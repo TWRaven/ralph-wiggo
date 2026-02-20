@@ -77,27 +77,38 @@ func (r *RunCmd) Run(globals *CLI) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	iteration := 0
+	// Per-story iteration tracking.
+	storyIterations := make(map[string]int)
+	skippedStories := make(map[string]bool)
+
 	for {
 		// Get next stories to work on.
 		stories, err := planner.NextStories(ctx, p, r.Parallelism, exec)
 		if err != nil {
 			return fmt.Errorf("planner: %w", err)
 		}
-		if len(stories) == 0 {
-			fmt.Println("\nAll stories pass!")
-			break
-		}
 
-		iteration++
-		if iteration > r.MaxIterations {
-			fmt.Printf("\nReached max iterations (%d). Stopping.\n", r.MaxIterations)
+		// Filter out stories that have exceeded max iterations.
+		var eligible []*prd.UserStory
+		for _, s := range stories {
+			if !skippedStories[s.ID] {
+				eligible = append(eligible, s)
+			}
+		}
+		if len(eligible) == 0 {
+			if len(stories) > 0 {
+				fmt.Println("\nRemaining stories skipped (exceeded max iterations).")
+			} else {
+				fmt.Println("\nAll stories pass!")
+			}
 			break
 		}
 
 		// In sequential mode, there is exactly one story.
-		story := stories[0]
-		fmt.Printf("\n--- Iteration %d: %s - %s ---\n", iteration, story.ID, story.Title)
+		story := eligible[0]
+		storyIterations[story.ID]++
+		iterNum := storyIterations[story.ID]
+		fmt.Printf("\n--- %s - %s (iteration %d/%d) ---\n", story.ID, story.Title, iterNum, r.MaxIterations)
 
 		// Build the story prompt.
 		storyPrompt := buildStoryPrompt(story)
@@ -116,6 +127,11 @@ func (r *RunCmd) Run(globals *CLI) error {
 		events, err := exec.RunStreaming(ctx, cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", story.ID, err)
+			fmt.Printf("[%s] FAIL (iteration %d/%d) — could not start agent\n", story.ID, iterNum, r.MaxIterations)
+			if iterNum >= r.MaxIterations {
+				skippedStories[story.ID] = true
+				fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", story.ID, r.MaxIterations)
+			}
 			continue
 		}
 
@@ -128,16 +144,42 @@ func (r *RunCmd) Run(globals *CLI) error {
 			}
 		}
 
-		if exitedCleanly {
-			fmt.Printf("\n[%s] Agent completed.\n", story.ID)
-		} else {
-			fmt.Printf("\n[%s] Agent encountered errors.\n", story.ID)
-		}
+		// Capture story info before reloading PRD (the pointer becomes stale).
+		storyID := story.ID
+		storyTitle := story.Title
 
-		// Reload PRD to pick up any changes the agent made.
+		// Reload PRD to pick up any changes the agent may have made.
 		p, err = prd.LoadPRD(r.PRDPath)
 		if err != nil {
 			return fmt.Errorf("reloading PRD after iteration: %w", err)
+		}
+
+		if exitedCleanly {
+			// Agent exited with code 0: find the story in the reloaded PRD and mark as passed.
+			for i := range p.UserStories {
+				if p.UserStories[i].ID == storyID {
+					p.UserStories[i].Passes = true
+					break
+				}
+			}
+			if err := prd.SavePRD(r.PRDPath, p); err != nil {
+				return fmt.Errorf("saving PRD after %s passed: %w", storyID, err)
+			}
+
+			// Commit all changes including the prd.json update.
+			commitMsg := fmt.Sprintf("ralph-wiggo: %s %s [passed]", storyID, storyTitle)
+			if err := git.CommitAll(commitMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: commit failed for %s: %v\n", storyID, err)
+			}
+
+			fmt.Printf("[%s] PASS (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
+		} else {
+			// Agent exited with non-zero: leave passes = false.
+			fmt.Printf("[%s] FAIL (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
+			if iterNum >= r.MaxIterations {
+				skippedStories[storyID] = true
+				fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", storyID, r.MaxIterations)
+			}
 		}
 	}
 
@@ -149,6 +191,18 @@ func (r *RunCmd) Run(globals *CLI) error {
 		}
 	}
 	fmt.Printf("\nSummary: %d/%d stories passed\n", passed, total)
+	if len(skippedStories) > 0 {
+		fmt.Printf("Skipped stories: ")
+		first := true
+		for id := range skippedStories {
+			if !first {
+				fmt.Print(", ")
+			}
+			fmt.Print(id)
+			first = false
+		}
+		fmt.Println()
+	}
 
 	return nil
 }

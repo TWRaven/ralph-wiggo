@@ -175,8 +175,16 @@ func (e *Executor) RunStreaming(ctx context.Context, cfg RunConfig) (<-chan Stre
 			}
 		}
 
-		// Wait for process to exit.
-		_ = cmd.Wait()
+		// Wait for process to exit and report non-zero exit as an error event.
+		if waitErr := cmd.Wait(); waitErr != nil {
+			select {
+			case ch <- StreamEvent{
+				Type:    EventError,
+				Message: fmt.Sprintf("agent process exited with error: %v", waitErr),
+			}:
+			case <-ctx.Done():
+			}
+		}
 	}()
 
 	return ch, nil

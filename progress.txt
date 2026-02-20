@@ -30,6 +30,9 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `CreateOrCheckoutBranch` tries checkout first, falls back to `checkout -b` for new branches
 - `WorktreeAdd` creates worktree with `-b` flag to create a new branch at the path
 - `CommitAll` does `git add -A` then `git commit -m` — stages everything including untracked files
+- `RunStreaming` sends an error event if the process exits non-zero — callers use `exitedCleanly` bool to check success
+- Per-story iteration tracking: `storyIterations map[string]int` and `skippedStories map[string]bool` in the run loop
+- After PRD reload, story pointers are stale — capture `storyID` and `storyTitle` before reloading
 
 ---
 
@@ -153,4 +156,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `printStreamEvent` handles all event types: assistant text printed inline, tool_use/tool_result as bracketed indicators, errors to stderr
   - The loop checks `planner.NextStories` at the top of each iteration — when all stories pass, it returns empty slice and the loop breaks
   - `--max-iterations` flag (default 10) is a global safety net; future US-012 will add per-story iteration tracking
+---
+
+## 2026-02-20 - US-012
+- Implemented: Story verification and prd.json updates — agent loop now tracks per-story iterations, marks stories as passed on clean exit (code 0), commits changes via git.CommitAll, skips stories that exceed max-iterations, and prints per-iteration summaries
+- Files changed: internal/claude/claude.go, cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - `RunStreaming` goroutine now captures `cmd.Wait()` error and emits an error event — previously the exit code was silently discarded
+  - After reloading PRD with `prd.LoadPRD`, all previous `*prd.UserStory` pointers are stale — must capture ID/title before reload and find the story in the reloaded slice by ID
+  - Per-story iteration tracking uses two maps: `storyIterations` (attempt count) and `skippedStories` (exceeded max)
+  - The planner doesn't know about skipped stories — the run loop filters them out after `NextStories` returns
+  - `--max-iterations` is now per-story, not global — the loop terminates when all stories either pass or are skipped
 ---

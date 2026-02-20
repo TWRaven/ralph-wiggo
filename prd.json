@@ -165,7 +165,7 @@
         "go vet ./... passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Worktrees are used for parallel agent execution. Each parallel agent gets its own worktree to avoid file conflicts."
     },
     {

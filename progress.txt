@@ -26,6 +26,10 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - Planner modes: "sequential" (single story), "parallel-N" (up to N stories), "auto" (Claude dependency analysis)
 - `planner.JSONRunner` interface: accepted by `NextStories` for auto mode — satisfied by `*claude.Executor`, testable with mocks
 - Auto mode falls back to sequential on any failure (nil executor, Claude error, invalid JSON, empty batches)
+- `internal/git` package: all functions shell out via `os/exec` — use `run()` helper that returns trimmed combined output
+- `CreateOrCheckoutBranch` tries checkout first, falls back to `checkout -b` for new branches
+- `WorktreeAdd` creates worktree with `-b` flag to create a new branch at the path
+- `CommitAll` does `git add -A` then `git commit -m` — stages everything including untracked files
 
 ---
 
@@ -122,4 +126,16 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Fallback strategy: log the error + return sequential result (never propagate auto-mode errors to callers)
   - `mockJSONRunner` pattern: struct with `response` and `err` fields satisfies the interface for deterministic tests
   - Auto mode skips batches where all stories are already complete — finds the first batch with at least one incomplete story
+---
+
+## 2026-02-20 - US-010
+- Implemented: Git operations package (internal/git) with CreateOrCheckoutBranch, WorktreeAdd, WorktreeRemove, CommitAll, CurrentBranch functions
+- Files changed: internal/git/git.go
+- **Learnings for future iterations:**
+  - All git functions use a shared `run()` helper that calls `exec.Command("git", ...)` and returns trimmed combined output
+  - `CreateOrCheckoutBranch` tries `git checkout` first, falls back to `git checkout -b` — handles both existing and new branches
+  - `WorktreeAdd` uses `git worktree add -b <branch> <path>` — creates a new branch at the worktree path
+  - `WorktreeRemove` uses `--force` flag to ensure cleanup even if worktree has uncommitted changes
+  - `CommitAll` does `git add -A` (stages everything including untracked) then `git commit -m`
+  - Error messages include the git subcommand name and stderr output for debuggability
 ---

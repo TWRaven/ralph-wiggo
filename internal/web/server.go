@@ -9,7 +9,10 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
@@ -41,6 +44,63 @@ type storyDetailData struct {
 	HasStore    bool
 }
 
+// historyData is the template context for the run history page.
+type historyData struct {
+	Runs []runSummary
+}
+
+// runSummary is a summary of a single run for the history list.
+type runSummary struct {
+	ID         string
+	BranchName string
+	StartTime  string
+	StoryCount int
+	Passed     int
+	Failed     int
+	Status     string
+}
+
+// runDetailData is the template context for a single run's detail page.
+type runDetailData struct {
+	Run      *state.Run
+	Sessions []sessionSummary
+	Start    string
+}
+
+// sessionSummary summarizes an agent session within a run.
+type sessionSummary struct {
+	StoryID       string
+	Status        string
+	StatusClass   string
+	IterCount     int
+	LastIteration string
+}
+
+// runStoryDetailData is the template context for viewing a story's iterations within a run.
+type runStoryDetailData struct {
+	RunID       string
+	StoryID     string
+	BranchName  string
+	Sessions    *state.AgentSession
+	Iterations  []iterationView
+	StatusClass string
+}
+
+// iterationView is a single iteration for display.
+type iterationView struct {
+	Number    int
+	Status    string
+	StatusCls string
+	EndTime   string
+	Events    []claude.StreamEvent
+}
+
+// runProgressData is the template context for viewing progress.txt.
+type runProgressData struct {
+	RunID   string
+	Content string
+}
+
 // Server is the web dashboard HTTP server.
 type Server struct {
 	prdPath string
@@ -52,7 +112,12 @@ type Server struct {
 // NewServer creates a new web server that reads PRD data from the given path.
 // The store parameter may be nil if no state store is available.
 func NewServer(prdPath string, port int, store *state.MemoryStore) (*Server, error) {
-	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
+	funcMap := template.FuncMap{
+		"renderEvent": func(evt claude.StreamEvent) template.HTML {
+			return template.HTML(renderEventHTML(evt))
+		},
+	}
+	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parsing templates: %w", err)
 	}
@@ -83,6 +148,10 @@ func NewServer(prdPath string, port int, store *state.MemoryStore) (*Server, err
 
 	// SSE streaming endpoint for story events.
 	mux.HandleFunc("/api/story/", s.handleStoryAPI)
+
+	// History routes.
+	mux.HandleFunc("/history", s.handleHistory)
+	mux.HandleFunc("/history/", s.handleHistoryRoutes)
 
 	s.srv = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -381,6 +450,239 @@ func renderEventHTML(evt claude.StreamEvent) string {
 		return `<div class="event event-result">Agent finished</div>`
 	default:
 		return ""
+	}
+}
+
+// handleHistory renders the run history list page.
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "No state store available", http.StatusServiceUnavailable)
+		return
+	}
+
+	runs, err := s.store.ListRuns()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("listing runs: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var summaries []runSummary
+	for _, run := range runs {
+		passed, failed := 0, 0
+		for _, sess := range run.Stories {
+			switch sess.Status {
+			case state.StatusPassed:
+				passed++
+			case state.StatusFailed:
+				failed++
+			}
+		}
+		status := string(run.Status)
+		summaries = append(summaries, runSummary{
+			ID:         run.ID,
+			BranchName: run.BranchName,
+			StartTime:  run.StartTime.Format("2006-01-02 15:04"),
+			StoryCount: len(run.Stories),
+			Passed:     passed,
+			Failed:     failed,
+			Status:     status,
+		})
+	}
+
+	data := historyData{Runs: summaries}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "history.html", data); err != nil {
+		http.Error(w, fmt.Sprintf("rendering history: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleHistoryRoutes routes /history/<run-id>/... paths.
+func (s *Server) handleHistoryRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/history/")
+	if path == "" {
+		s.handleHistory(w, r)
+		return
+	}
+
+	// Parse: <run-id>, <run-id>/story/<story-id>, <run-id>/progress
+	parts := strings.SplitN(path, "/", 3)
+	runID := parts[0]
+
+	if len(parts) == 1 {
+		s.handleRunDetail(w, r, runID)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "progress" {
+		s.handleRunProgress(w, r, runID)
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "story" {
+		s.handleRunStoryDetail(w, r, runID, parts[2])
+		return
+	}
+
+	http.NotFound(w, r)
+}
+
+// handleRunDetail renders a single run's detail page with per-story outcomes.
+func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request, runID string) {
+	if s.store == nil {
+		http.Error(w, "No state store available", http.StatusServiceUnavailable)
+		return
+	}
+
+	run, err := s.store.GetRun(runID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var sessions []sessionSummary
+	for _, sess := range run.Stories {
+		statusClass := "pending"
+		switch sess.Status {
+		case state.StatusPassed:
+			statusClass = "passed"
+		case state.StatusFailed:
+			statusClass = "failed"
+		case state.StatusRunning:
+			statusClass = "running"
+		}
+		lastIter := ""
+		if len(sess.Iterations) > 0 {
+			last := sess.Iterations[len(sess.Iterations)-1]
+			if !last.EndTime.IsZero() {
+				lastIter = last.EndTime.Format("15:04:05")
+			}
+		}
+		sessions = append(sessions, sessionSummary{
+			StoryID:       sess.StoryID,
+			Status:        string(sess.Status),
+			StatusClass:   statusClass,
+			IterCount:     len(sess.Iterations),
+			LastIteration: lastIter,
+		})
+	}
+
+	data := runDetailData{
+		Run:      run,
+		Sessions: sessions,
+		Start:    run.StartTime.Format(time.RFC1123),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "run_detail.html", data); err != nil {
+		http.Error(w, fmt.Sprintf("rendering run detail: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleRunStoryDetail renders the iteration detail for a story within a run.
+func (s *Server) handleRunStoryDetail(w http.ResponseWriter, r *http.Request, runID, storyID string) {
+	if s.store == nil {
+		http.Error(w, "No state store available", http.StatusServiceUnavailable)
+		return
+	}
+
+	run, err := s.store.GetRun(runID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var session *state.AgentSession
+	for _, sess := range run.Stories {
+		if sess.StoryID == storyID {
+			session = sess
+			break
+		}
+	}
+	if session == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	statusClass := "pending"
+	switch session.Status {
+	case state.StatusPassed:
+		statusClass = "passed"
+	case state.StatusFailed:
+		statusClass = "failed"
+	case state.StatusRunning:
+		statusClass = "running"
+	}
+
+	var iterations []iterationView
+	for _, iter := range session.Iterations {
+		iterCls := "pending"
+		switch iter.Status {
+		case state.StatusPassed:
+			iterCls = "passed"
+		case state.StatusFailed:
+			iterCls = "failed"
+		case state.StatusRunning:
+			iterCls = "running"
+		}
+		endTime := ""
+		if !iter.EndTime.IsZero() {
+			endTime = iter.EndTime.Format("2006-01-02 15:04:05")
+		}
+		iterations = append(iterations, iterationView{
+			Number:    iter.Number,
+			Status:    string(iter.Status),
+			StatusCls: iterCls,
+			EndTime:   endTime,
+			Events:    iter.Events,
+		})
+	}
+
+	data := runStoryDetailData{
+		RunID:       runID,
+		StoryID:     storyID,
+		BranchName:  run.BranchName,
+		Sessions:    session,
+		Iterations:  iterations,
+		StatusClass: statusClass,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "run_story.html", data); err != nil {
+		http.Error(w, fmt.Sprintf("rendering run story detail: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleRunProgress shows progress.txt content for a run.
+func (s *Server) handleRunProgress(w http.ResponseWriter, r *http.Request, runID string) {
+	if s.store == nil {
+		http.Error(w, "No state store available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Verify the run exists.
+	if _, err := s.store.GetRun(runID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Read progress.txt from the same directory as prd.json.
+	progressPath := filepath.Join(filepath.Dir(s.prdPath), "progress.txt")
+	content := ""
+	if data, err := os.ReadFile(progressPath); err == nil {
+		content = string(data)
+	} else {
+		content = "(no progress.txt found)"
+	}
+
+	tplData := runProgressData{
+		RunID:   runID,
+		Content: content,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "run_progress.html", tplData); err != nil {
+		http.Error(w, fmt.Sprintf("rendering progress: %v", err), http.StatusInternalServerError)
 	}
 }
 

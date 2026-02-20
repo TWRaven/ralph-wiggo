@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.StoryID}} - {{.RunID}} - ralph-wiggo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a href="/history/{{.RunID}}" class="back-link">&larr; {{.RunID}}</a>
+  <h1>{{.StoryID}}</h1>
+  <div class="subtitle">
+    <span class="badge badge-{{.StatusClass}}">{{.Sessions.Status}}</span>
+    &middot; {{.BranchName}} &middot; {{len .Iterations}} iteration(s)
+  </div>
+
+  {{range .Iterations}}
+  <div class="iteration-block">
+    <h2>
+      Iteration {{.Number}}
+      <span class="badge badge-{{.StatusCls}}">{{.Status}}</span>
+      {{if .EndTime}}<span class="iter-time">{{.EndTime}}</span>{{end}}
+    </h2>
+    <div class="events-container">
+      {{range .Events}}{{$h := renderEvent .}}{{if $h}}{{$h}}{{end}}{{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <footer>ralph-wiggo &middot; autonomous agent loop</footer>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Run.ID}} - ralph-wiggo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a href="/history" class="back-link">&larr; Run History</a>
+  <h1>{{.Run.ID}}</h1>
+  <div class="subtitle">
+    branch: {{.Run.BranchName}} &middot; started: {{.Start}}
+    &middot; <a href="/history/{{.Run.ID}}/progress">view progress.txt</a>
+  </div>
+
+  {{if .Sessions}}
+  <table>
+    <thead>
+      <tr>
+        <th>Story</th>
+        <th>Status</th>
+        <th>Iterations</th>
+        <th>Last Activity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Sessions}}
+      <tr>
+        <td class="story-id"><a href="/history/{{$.Run.ID}}/story/{{.StoryID}}">{{.StoryID}}</a></td>
+        <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+        <td>{{.IterCount}}</td>
+        <td>{{.LastIteration}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="no-events">No story sessions recorded for this run.</p>
+  {{end}}
+
+  <footer>ralph-wiggo &middot; autonomous agent loop</footer>
+</body>
+</html>

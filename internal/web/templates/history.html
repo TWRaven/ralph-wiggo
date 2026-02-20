@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Run History - ralph-wiggo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Dashboard</a>
+  <h1>Run History</h1>
+
+  {{if .Runs}}
+  <table>
+    <thead>
+      <tr>
+        <th>Run ID</th>
+        <th>Branch</th>
+        <th>Started</th>
+        <th>Stories</th>
+        <th>Passed</th>
+        <th>Failed</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Runs}}
+      <tr>
+        <td class="story-id"><a href="/history/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.BranchName}}</td>
+        <td>{{.StartTime}}</td>
+        <td>{{.StoryCount}}</td>
+        <td>{{.Passed}}</td>
+        <td>{{.Failed}}</td>
+        <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="no-events">No runs recorded yet.</p>
+  {{end}}
+
+  <footer>ralph-wiggo &middot; autonomous agent loop</footer>
+</body>
+</html>

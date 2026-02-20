@@ -43,3 +43,9 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--bg2);color:va
 .event-init{color:var(--fg2);font-size:.75rem}
 .event-result{color:var(--green);font-weight:bold}
 .event-info{color:var(--fg2);font-style:italic}
+.nav-links{margin-top:1.5rem;font-size:.85rem}
+.iteration-block{margin-bottom:2rem;border:1px solid var(--bg2);border-radius:4px;padding:1rem}
+.iteration-block h2{display:flex;align-items:center;gap:.5rem}
+.iter-time{font-size:.75rem;color:var(--fg2);font-weight:normal;margin-left:auto}
+.events-container{max-height:60vh;overflow-y:auto;margin-top:.75rem;padding:.5rem;background:var(--bg);border-radius:3px}
+.progress-content{background:var(--bg2);padding:1rem;border-radius:4px;font-size:.8rem;line-height:1.8;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word}

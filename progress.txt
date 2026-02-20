@@ -257,4 +257,19 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `html.EscapeString` (from `html` package, not `html/template`) for safe HTML rendering in SSE event data
   - State store now wired end-to-end: agent loop → PublishEvent → SSE subscribers, and agent loop → AddIteration → historical view
   - `NewServer` signature changed to accept `*state.MemoryStore` (may be nil) — all handlers check for nil store gracefully
+  - History routes use path-based routing: `/history`, `/history/<run-id>`, `/history/<run-id>/story/<story-id>`, `/history/<run-id>/progress`
+  - `handleHistoryRoutes` parses nested paths with `strings.SplitN(path, "/", 3)` — dispatches to sub-handlers by part count
+  - `template.FuncMap` with `renderEvent` registered before `ParseFS` — wraps `renderEventHTML` to return `template.HTML` for safe rendering
+  - `template.New("").Funcs(funcMap).ParseFS(...)` — Funcs must be registered before ParseFS, not after
+---
+
+## 2026-02-20 - US-018
+- Implemented: Run history and log archive view — `/history` lists all runs with date, branch, story count, pass/fail summary; `/history/<run-id>` shows run detail with per-story outcomes; `/history/<run-id>/story/<story-id>` shows iteration detail with events rendered in same format as story detail view; `/history/<run-id>/progress` displays progress.txt content
+- Files changed: internal/web/server.go (new handlers: handleHistory, handleHistoryRoutes, handleRunDetail, handleRunStoryDetail, handleRunProgress; new data types; template.FuncMap for renderEvent), internal/web/templates/history.html (new), internal/web/templates/run_detail.html (new), internal/web/templates/run_story.html (new), internal/web/templates/run_progress.html (new), internal/web/templates/dashboard.html (history link), internal/web/static/style.css (history view styles)
+- **Learnings for future iterations:**
+  - `template.FuncMap` must be registered via `template.New("").Funcs(funcMap)` BEFORE `ParseFS` — otherwise templates referencing custom functions fail at parse time
+  - `renderEventHTML` returns `string` (for SSE use) but templates auto-escape HTML — wrap in `template.HTML` via the funcMap closure to render safely
+  - Nested route matching with `http.ServeMux`: register both `/history` (exact) and `/history/` (prefix) to handle both the list and sub-paths
+  - `strings.SplitN(path, "/", 3)` with part count check handles variable-depth URL patterns cleanly
+  - Progress.txt path derived from `filepath.Dir(s.prdPath)` keeps it alongside prd.json regardless of server working directory
 ---

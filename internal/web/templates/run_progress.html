@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Progress - {{.RunID}} - ralph-wiggo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a href="/history/{{.RunID}}" class="back-link">&larr; {{.RunID}}</a>
+  <h1>progress.txt</h1>
+  <div class="subtitle">{{.RunID}}</div>
+
+  <pre class="progress-content">{{.Content}}</pre>
+
+  <footer>ralph-wiggo &middot; autonomous agent loop</footer>
+</body>
+</html>

@@ -33,6 +33,8 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `RunStreaming` sends an error event if the process exits non-zero — callers use `exitedCleanly` bool to check success
 - Per-story iteration tracking: `storyIterations map[string]int` and `skippedStories map[string]bool` in the run loop
 - After PRD reload, story pointers are stale — capture `storyID` and `storyTitle` before reloading
+- `internal/progress` package: `InitIfNeeded` creates header, `AppendEntry` logs iterations, `ArchiveIfBranchChanged` moves old run files to `archive/`
+- Archive checks progress.txt `Branch:` header vs current PRD branchName — compares file header, not PRD file contents
 
 ---
 
@@ -167,4 +169,18 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Per-story iteration tracking uses two maps: `storyIterations` (attempt count) and `skippedStories` (exceeded max)
   - The planner doesn't know about skipped stories — the run loop filters them out after `NextStories` returns
   - `--max-iterations` is now per-story, not global — the loop terminates when all stories either pass or are skipped
+---
+
+## 2026-02-20 - US-013
+- Implemented: Progress.txt management and run archiving — new `internal/progress` package with `InitIfNeeded`, `AppendEntry`, and `ArchiveIfBranchChanged` functions; integrated into `RunCmd.Run` in main.go
+- Files changed: internal/progress/progress.go, internal/progress/progress_test.go, cmd/ralph-wiggo/main.go, internal/prd/prd.go (reverted back), prd.json
+- **Learnings for future iterations:**
+  - `progress.InitIfNeeded` uses `os.Stat` to check existence — noop if file already exists
+  - `progress.AppendEntry` collects `StreamEvent` slice from the run loop, summarizes tool usage (deduped counts) and errors
+  - Archive logic compares progress.txt's `Branch:` header line with the current PRD's branchName — not the on-disk prd.json, since that may already have been overwritten by `convert`
+  - `readProgressBranch` scans the header (stops at `---` separator) for the `Branch:` line
+  - Archive copies prd.json as a snapshot (doesn't move it) since the current PRD still needs to exist at the original path
+  - Archive directory naming: `archive/YYYY-MM-DD-<feature-name>/` where feature-name is the old branchName with `ralph/` prefix stripped
+  - Collect events in a `[]claude.StreamEvent` slice during the streaming loop — pass to `AppendEntry` after determining pass/fail
+  - `progressPath` is derived from `filepath.Dir(r.PRDPath)` + "progress.txt" — keeps progress.txt alongside prd.json
 ---

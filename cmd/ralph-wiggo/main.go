@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -13,6 +14,7 @@ import (
 	"github.com/radvoogh/ralph-wiggo/internal/git"
 	"github.com/radvoogh/ralph-wiggo/internal/planner"
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
+	"github.com/radvoogh/ralph-wiggo/internal/progress"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
 )
 
@@ -53,11 +55,24 @@ type RunCmd struct {
 }
 
 func (r *RunCmd) Run(globals *CLI) error {
+	progressPath := filepath.Join(filepath.Dir(r.PRDPath), "progress.txt")
+
 	// Load the PRD.
 	p, err := prd.LoadPRD(r.PRDPath)
 	if err != nil {
 		return fmt.Errorf("loading PRD: %w", err)
 	}
+
+	// Archive existing progress.txt (and prd.json snapshot) if the branch changed.
+	archived, err := progress.ArchiveIfBranchChanged(
+		globals.WorkDir, r.PRDPath, progressPath, p.BranchName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: archiving previous run: %v\n", err)
+	}
+	if archived {
+		fmt.Println("Archived previous run (branch changed).")
+	}
+
 	fmt.Printf("Loaded PRD: %s (%d stories)\n", p.Project, len(p.UserStories))
 
 	// Create or check out the feature branch.
@@ -65,6 +80,11 @@ func (r *RunCmd) Run(globals *CLI) error {
 		return fmt.Errorf("switching to branch %q: %w", p.BranchName, err)
 	}
 	fmt.Printf("On branch: %s\n", p.BranchName)
+
+	// Initialize progress.txt with header if it doesn't exist.
+	if err := progress.InitIfNeeded(progressPath, p.Project, p.BranchName); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: initializing progress.txt: %v\n", err)
+	}
 
 	// Load the embedded agent prompt for --append-system-prompt.
 	agentPrompt, err := prompts.Get("prompt.md")
@@ -135,10 +155,12 @@ func (r *RunCmd) Run(globals *CLI) error {
 			continue
 		}
 
-		// Print streaming events as they arrive.
+		// Print streaming events as they arrive and collect them for progress.
 		exitedCleanly := true
+		var collectedEvents []claude.StreamEvent
 		for evt := range events {
 			printStreamEvent(evt)
+			collectedEvents = append(collectedEvents, evt)
 			if evt.Type == claude.EventError {
 				exitedCleanly = false
 			}
@@ -166,6 +188,11 @@ func (r *RunCmd) Run(globals *CLI) error {
 				return fmt.Errorf("saving PRD after %s passed: %w", storyID, err)
 			}
 
+			// Append progress entry before committing.
+			if err := progress.AppendEntry(progressPath, storyID, true, collectedEvents); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+			}
+
 			// Commit all changes including the prd.json update.
 			commitMsg := fmt.Sprintf("ralph-wiggo: %s %s [passed]", storyID, storyTitle)
 			if err := git.CommitAll(commitMsg); err != nil {
@@ -175,6 +202,11 @@ func (r *RunCmd) Run(globals *CLI) error {
 			fmt.Printf("[%s] PASS (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
 		} else {
 			// Agent exited with non-zero: leave passes = false.
+			// Append progress entry for the failure.
+			if err := progress.AppendEntry(progressPath, storyID, false, collectedEvents); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+			}
+
 			fmt.Printf("[%s] FAIL (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
 			if iterNum >= r.MaxIterations {
 				skippedStories[storyID] = true

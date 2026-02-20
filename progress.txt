@@ -11,6 +11,8 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `internal/prompts` wraps the embedded FS — use `prompts.Get("filename.md")` to read content
 - Override embedded files at runtime via `prompts.SetOverride(name, path)` or CLI `--prompt-override name=path`
 - Kong `AfterApply()` method on CLI struct runs after flag parsing, before subcommand — used for setup logic
+- `internal/claude` package: `Executor` wraps the claude CLI, `RunConfig` holds invocation params, `StreamEvent` models NDJSON output
+- `RunStreaming` uses `exec.CommandContext` for cancellation, `bufio.Scanner` for NDJSON parsing, returns `<-chan StreamEvent`
 
 ---
 
@@ -32,4 +34,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Solution: put embed.FS export in `embedded/` package, then import from `internal/prompts`
   - Kong `AfterApply()` on CLI struct is the right hook for pre-command setup (override registration)
   - Kong supports `[]string` flags that can be repeated: `--prompt-override a=b --prompt-override c=d`
+---
+
+## 2026-02-20 - US-003
+- Implemented: Claude CLI executor package (internal/claude) with Executor struct, RunConfig, StreamEvent types, and RunStreaming method for spawning claude with NDJSON streaming output
+- Files changed: internal/claude/claude.go
+- **Learnings for future iterations:**
+  - Claude CLI `--output-format stream-json` emits NDJSON — one JSON object per line with a `type` field
+  - Use `exec.CommandContext` for context cancellation of subprocesses
+  - `bufio.Scanner` needs a large buffer (10MB) for tool output lines that can be very large
+  - Always drain stderr in a separate goroutine to prevent blocking the subprocess
+  - `json.RawMessage` is useful for preserving raw event data while also parsing known fields
 ---

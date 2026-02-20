@@ -25,6 +25,17 @@ var staticFS embed.FS
 //go:embed templates/*.html
 var templateFS embed.FS
 
+// storyRow is an enriched story for the dashboard table.
+type storyRow struct {
+	ID          string
+	Title       string
+	Priority    int
+	Status      string // pending, running, passed, failed
+	StatusClass string // CSS class matching Status
+	IterCount   int    // number of iterations attempted
+	Elapsed     string // human-readable time indicator
+}
+
 // dashboardData is the template context for the main dashboard.
 type dashboardData struct {
 	Project    string
@@ -32,7 +43,7 @@ type dashboardData struct {
 	Passed     int
 	Total      int
 	Percent    int
-	Stories    []prd.UserStory
+	Stories    []storyRow
 }
 
 // storyDetailData is the template context for a story detail page.
@@ -183,7 +194,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// loadDashboardData reads the PRD and computes template data.
+// loadDashboardData reads the PRD and computes template data, enriching
+// story rows with state store information when available.
 func (s *Server) loadDashboardData() (*dashboardData, error) {
 	p, err := prd.LoadPRD(s.prdPath)
 	if err != nil {
@@ -191,10 +203,57 @@ func (s *Server) loadDashboardData() (*dashboardData, error) {
 	}
 
 	passed := 0
+	var rows []storyRow
 	for _, story := range p.UserStories {
+		row := storyRow{
+			ID:       story.ID,
+			Title:    story.Title,
+			Priority: story.Priority,
+		}
+
 		if story.Passes {
 			passed++
+			row.Status = "passed"
+			row.StatusClass = "passed"
+		} else {
+			row.Status = "pending"
+			row.StatusClass = "pending"
 		}
+
+		// Enrich with state store data if available.
+		if s.store != nil {
+			session := s.store.GetLatestSession(story.ID)
+			if session != nil {
+				row.IterCount = len(session.Iterations)
+
+				if !story.Passes {
+					switch session.Status {
+					case state.StatusRunning:
+						row.Status = "running"
+						row.StatusClass = "running"
+					case state.StatusFailed:
+						row.Status = "failed"
+						row.StatusClass = "failed"
+					}
+				}
+
+				// Compute elapsed time from iterations.
+				if len(session.Iterations) > 0 {
+					last := session.Iterations[len(session.Iterations)-1]
+					if !last.EndTime.IsZero() {
+						row.Elapsed = formatElapsed(time.Since(last.EndTime))
+					} else if session.Status == state.StatusRunning {
+						row.Elapsed = "running…"
+					}
+				}
+			}
+		}
+
+		if row.Elapsed == "" {
+			row.Elapsed = "-"
+		}
+
+		rows = append(rows, row)
 	}
 
 	total := len(p.UserStories)
@@ -209,8 +268,19 @@ func (s *Server) loadDashboardData() (*dashboardData, error) {
 		Passed:     passed,
 		Total:      total,
 		Percent:    pct,
-		Stories:    p.UserStories,
+		Stories:    rows,
 	}, nil
+}
+
+// formatElapsed returns a human-readable string for a duration.
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh ago", int(d.Hours()))
 }
 
 // handleDashboard renders the full dashboard page.

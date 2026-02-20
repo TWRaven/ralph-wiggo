@@ -18,7 +18,7 @@
   <tbody>
     {{range .Stories}}
     <tr>
-      <td class="story-id">{{.ID}}</td>
+      <td class="story-id"><a href="/story/{{.ID}}">{{.ID}}</a></td>
       <td>{{.Title}}</td>
       <td>{{.Priority}}</td>
       <td>

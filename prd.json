@@ -283,7 +283,7 @@
         "go vet ./... passes"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "The state store's StreamEvents for the story are fanned out to SSE subscribers. For completed stories, all events are sent immediately then the stream closes."
     },
     {

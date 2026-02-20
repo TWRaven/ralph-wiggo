@@ -47,8 +47,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `internal/web` package: `Server` struct wraps `http.Server`, reads PRD on each request for live data
 - Web templates embedded via `go:embed` in `internal/web/templates/*.html`, static files in `internal/web/static/*`
 - htmx polling: `hx-get="/api/stories"` with `hx-trigger="every 2s"` on a div that wraps the dynamic content
-- `NewServer(prdPath, port)` sets up routes, parses templates, returns `*Server` — call `Start()` for background or `ListenAndServe()` for blocking
+- `NewServer(prdPath, port, store)` sets up routes, parses templates, returns `*Server` — call `Start()` for background or `ListenAndServe()` for blocking
 - Dashboard partial ("stories" template) includes progress bar + story table — polled as a unit so both update together
+- `MemoryStore` has broadcasting support: `PublishEvent`, `Subscribe`, `CloseSubscribers`, `ResetBroadcast` — used for SSE streaming
+- `Subscribe` returns snapshot of existing events + live channel — handles late-joining SSE subscribers
+- SSE endpoints use `text/event-stream` content type, `writeSSE` helper formats event/data lines, client uses htmx SSE extension (`hx-ext="sse"`, `sse-connect`, `sse-swap`)
+- Story detail at `/story/<id>`, SSE stream at `/api/story/<id>/stream` — URL path parsing with `strings.TrimPrefix`
+- Completed stories: SSE sends all historical events from `GetLatestSession`, then "done" event to close; Running stories: subscribes to live broadcast
+- State store wired into agent loop: `RunCmd.Run` creates store + Run, `runSingleAgent`/`runParallelAgents` publish events, `processStoryResult` adds Iteration
+- `ResetBroadcast` clears previous broadcast state before starting a new iteration for the same story
 
 ---
 
@@ -235,4 +242,19 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `Server.Start()` runs in a goroutine for non-blocking use (run --ui); `ListenAndServe()` blocks for standalone serve
   - PRD is re-read from disk on every request — no shared state needed between web server and agent loop
   - `http.ServeMux` with exact `/` path check in handler prevents catch-all behavior
+---
+
+## 2026-02-20 - US-017
+- Implemented: Story detail view with SSE streaming output — `/story/<id>` detail page with htmx SSE extension for real-time event streaming, event broadcasting in state store, agent loop wired to publish events and persist iterations
+- Files changed: internal/state/state.go (broadcasting: PublishEvent, Subscribe, CloseSubscribers, ResetBroadcast, GetLatestSession), internal/web/server.go (store field, story detail handler, SSE handler, renderEventHTML), internal/web/templates/story.html (new), internal/web/static/sse.js (new htmx SSE extension), internal/web/static/style.css (story detail + event styles), internal/web/templates/stories.html (story ID links), cmd/ralph-wiggo/main.go (state store creation, Run persistence, event publishing in runSingleAgent/runParallelAgents, iteration persistence in processStoryResult/processParallelResults, ServeCmd store loading)
+- **Learnings for future iterations:**
+  - htmx SSE extension: `hx-ext="sse"` on parent, `sse-connect="/url"` for EventSource, `sse-swap="eventName"` + `hx-swap="beforeend"` for appending events
+  - SSE protocol: `event: name\ndata: content\n\n` format, multi-line data uses multiple `data:` lines, `writeSSE` helper handles this
+  - `Subscribe` returns snapshot + live channel — snapshot sent first to handle late-joining subscribers, then live events streamed
+  - `CloseSubscribers` closes all channels for a story — SSE handler detects closed channel and sends "done" event to client
+  - `ResetBroadcast` needed before each new iteration to clear stale broadcast state from previous attempts
+  - `http.Flusher` interface must be asserted on ResponseWriter for SSE — flush after each event for real-time delivery
+  - `html.EscapeString` (from `html` package, not `html/template`) for safe HTML rendering in SSE event data
+  - State store now wired end-to-end: agent loop → PublishEvent → SSE subscribers, and agent loop → AddIteration → historical view
+  - `NewServer` signature changed to accept `*state.MemoryStore` (may be nil) — all handlers check for nil store gracefully
 ---

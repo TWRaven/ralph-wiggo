@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Story.ID}} - {{.Project}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/sse.js"></script>
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Dashboard</a>
+  <h1>{{.Story.ID}} &mdash; {{.Story.Title}}</h1>
+  <div class="subtitle">
+    <span class="badge badge-{{.StatusClass}}">{{.StatusClass}}</span>
+    &middot; {{.Project}} &middot; {{.BranchName}}
+  </div>
+
+  <p class="story-desc">{{.Story.Description}}</p>
+
+  <h2>Acceptance Criteria</h2>
+  <ul class="ac-list">
+    {{range .Story.AcceptanceCriteria}}
+    <li>{{.}}</li>
+    {{end}}
+  </ul>
+
+  {{if .Story.Notes}}
+  <h2>Notes</h2>
+  <p class="story-notes">{{.Story.Notes}}</p>
+  {{end}}
+
+  <h2>Agent Output</h2>
+  {{if .HasStore}}
+  <div hx-ext="sse" sse-connect="/api/story/{{.Story.ID}}/stream">
+    <div id="events" sse-swap="message" hx-swap="beforeend"></div>
+    <div id="done-indicator" sse-swap="done" hx-swap="innerHTML"></div>
+  </div>
+  {{else}}
+  <p class="no-events">No event data available. Run with --ui to enable live streaming.</p>
+  {{end}}
+
+  <script>
+  // Auto-scroll to bottom as new events arrive.
+  (function() {
+    var el = document.getElementById('events');
+    if (!el) return;
+    var observer = new MutationObserver(function() {
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+    observer.observe(el, {childList: true, subtree: true});
+  })();
+  </script>
+
+  <footer>ralph-wiggo &middot; autonomous agent loop</footer>
+</body>
+</html>

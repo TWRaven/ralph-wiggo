@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
@@ -17,6 +18,7 @@ import (
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
 	"github.com/radvoogh/ralph-wiggo/internal/progress"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
+	"github.com/radvoogh/ralph-wiggo/internal/state"
 	"github.com/radvoogh/ralph-wiggo/internal/web"
 )
 
@@ -94,9 +96,32 @@ func (r *RunCmd) Run(globals *CLI) error {
 		return fmt.Errorf("loading prompt.md: %w", err)
 	}
 
+	// Create state store for event tracking and persistence.
+	storeDir := filepath.Join(globals.WorkDir, ".ralph-wiggo", "runs")
+	store, err := state.NewMemoryStore(storeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: state store: %v\n", err)
+		store = nil
+	}
+
+	// Create a new run in the state store.
+	runID := fmt.Sprintf("run-%d", time.Now().Unix())
+	if store != nil {
+		run := &state.Run{
+			ID:         runID,
+			PRDPath:    r.PRDPath,
+			BranchName: p.BranchName,
+			StartTime:  time.Now(),
+			Status:     state.StatusRunning,
+		}
+		if err := store.SaveRun(run); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: saving initial run state: %v\n", err)
+		}
+	}
+
 	// Start web dashboard if --ui flag is set.
 	if r.UI {
-		srv, err := web.NewServer(r.PRDPath, 8484)
+		srv, err := web.NewServer(r.PRDPath, 8484, store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: starting web dashboard: %v\n", err)
 		} else {
@@ -146,17 +171,17 @@ func (r *RunCmd) Run(globals *CLI) error {
 			iterNum := storyIterations[story.ID]
 			fmt.Printf("\n--- %s - %s (iteration %d/%d) ---\n", story.ID, story.Title, iterNum, r.MaxIterations)
 
-			result := runSingleAgent(ctx, exec, story, agentPrompt, globals, r.PRDPath)
+			result := runSingleAgent(ctx, exec, story, agentPrompt, globals, r.PRDPath, store)
 
-			p, err = processStoryResult(result, r.PRDPath, progressPath, p, iterNum, r.MaxIterations, storyIterations, skippedStories)
+			p, err = processStoryResult(result, r.PRDPath, progressPath, p, iterNum, r.MaxIterations, storyIterations, skippedStories, store, runID)
 			if err != nil {
 				return err
 			}
 		} else {
 			// Parallel execution — run agents in separate worktrees.
-			results := runParallelAgents(ctx, exec, eligible, agentPrompt, globals, r.PRDPath, storyIterations, r.MaxIterations)
+			results := runParallelAgents(ctx, exec, eligible, agentPrompt, globals, r.PRDPath, storyIterations, r.MaxIterations, store)
 
-			p, err = processParallelResults(results, r.PRDPath, progressPath, p, r.MaxIterations, storyIterations, skippedStories)
+			p, err = processParallelResults(results, r.PRDPath, progressPath, p, r.MaxIterations, storyIterations, skippedStories, store, runID)
 			if err != nil {
 				return err
 			}
@@ -240,8 +265,8 @@ type storyResult struct {
 }
 
 // runSingleAgent runs a Claude agent for a single story in the current working
-// directory and returns the result.
-func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserStory, agentPrompt string, globals *CLI, prdPath string) storyResult {
+// directory and returns the result. Events are published to the store for SSE.
+func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserStory, agentPrompt string, globals *CLI, prdPath string, store *state.MemoryStore) storyResult {
 	storyPrompt := buildStoryPrompt(story)
 
 	cfg := claude.RunConfig{
@@ -255,6 +280,10 @@ func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserS
 		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
+	if store != nil {
+		store.ResetBroadcast(story.ID)
+	}
+
 	events, err := exec.RunStreaming(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", story.ID, err)
@@ -266,9 +295,16 @@ func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserS
 	for evt := range events {
 		printStreamEvent(evt)
 		collectedEvents = append(collectedEvents, evt)
+		if store != nil {
+			store.PublishEvent(story.ID, evt)
+		}
 		if evt.Type == claude.EventError {
 			exitedCleanly = false
 		}
+	}
+
+	if store != nil {
+		store.CloseSubscribers(story.ID)
 	}
 
 	return storyResult{
@@ -280,12 +316,32 @@ func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserS
 }
 
 // processStoryResult handles the result of a single story execution: updates
-// PRD, appends progress, and commits if passed. Returns the reloaded PRD.
-func processStoryResult(result storyResult, prdPath, progressPath string, p *prd.PRD, iterNum, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool) (*prd.PRD, error) {
+// PRD, appends progress, persists iteration to state store, and commits if
+// passed. Returns the reloaded PRD.
+func processStoryResult(result storyResult, prdPath, progressPath string, p *prd.PRD, iterNum, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool, store *state.MemoryStore, runID string) (*prd.PRD, error) {
 	// Reload PRD to pick up any changes the agent may have made.
 	p, err := prd.LoadPRD(prdPath)
 	if err != nil {
 		return nil, fmt.Errorf("reloading PRD after iteration: %w", err)
+	}
+
+	// Persist iteration to state store.
+	if store != nil {
+		iterStatus := state.StatusFailed
+		if result.passed {
+			iterStatus = state.StatusPassed
+		}
+		iter := state.Iteration{
+			RunID:   runID,
+			StoryID: result.storyID,
+			Number:  iterNum,
+			EndTime: time.Now(),
+			Status:  iterStatus,
+			Events:  result.events,
+		}
+		if err := store.AddIteration(runID, iter); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: saving iteration: %v\n", err)
+		}
 	}
 
 	if result.passed {
@@ -321,7 +377,7 @@ func processStoryResult(result storyResult, prdPath, progressPath string, p *prd
 
 // runParallelAgents runs Claude agents concurrently in separate git worktrees,
 // one per story. Returns all results after all agents complete.
-func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*prd.UserStory, agentPrompt string, globals *CLI, prdPath string, storyIterations map[string]int, maxIterations int) []storyResult {
+func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*prd.UserStory, agentPrompt string, globals *CLI, prdPath string, storyIterations map[string]int, maxIterations int, store *state.MemoryStore) []storyResult {
 	worktreeBase := filepath.Join(globals.WorkDir, ".ralph-wiggo", "worktrees")
 
 	fmt.Printf("\n=== Parallel batch: %d stories ===\n", len(stories))
@@ -384,6 +440,10 @@ func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*pr
 		go func(s *prd.UserStory, wtDir, branch string, iter int) {
 			defer wg.Done()
 
+			if store != nil {
+				store.ResetBroadcast(s.ID)
+			}
+
 			storyPrompt := buildStoryPrompt(s)
 			cfg := claude.RunConfig{
 				Prompt:             storyPrompt,
@@ -414,9 +474,16 @@ func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*pr
 				// In parallel mode, prefix output with story ID for clarity.
 				printParallelEvent(s.ID, evt)
 				collectedEvents = append(collectedEvents, evt)
+				if store != nil {
+					store.PublishEvent(s.ID, evt)
+				}
 				if evt.Type == claude.EventError {
 					exitedCleanly = false
 				}
+			}
+
+			if store != nil {
+				store.CloseSubscribers(s.ID)
 			}
 
 			mu.Lock()
@@ -454,8 +521,9 @@ func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*pr
 }
 
 // processParallelResults handles the results of parallel story executions:
-// merges worktree branches, updates PRD, appends progress, and commits.
-func processParallelResults(results []storyResult, prdPath, progressPath string, p *prd.PRD, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool) (*prd.PRD, error) {
+// merges worktree branches, updates PRD, appends progress, persists iterations,
+// and commits.
+func processParallelResults(results []storyResult, prdPath, progressPath string, p *prd.PRD, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool, store *state.MemoryStore, runID string) (*prd.PRD, error) {
 	for _, result := range results {
 		if result.passed && result.worktreeBranch != "" {
 			// Merge the worktree branch into the current branch.
@@ -472,6 +540,25 @@ func processParallelResults(results []storyResult, prdPath, progressPath string,
 		p, err = prd.LoadPRD(prdPath)
 		if err != nil {
 			return nil, fmt.Errorf("reloading PRD after %s: %w", result.storyID, err)
+		}
+
+		// Persist iteration to state store.
+		if store != nil {
+			iterStatus := state.StatusFailed
+			if result.passed {
+				iterStatus = state.StatusPassed
+			}
+			iter := state.Iteration{
+				RunID:   runID,
+				StoryID: result.storyID,
+				Number:  result.iterNum,
+				EndTime: time.Now(),
+				Status:  iterStatus,
+				Events:  result.events,
+			}
+			if err := store.AddIteration(runID, iter); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: saving iteration: %v\n", err)
+			}
 		}
 
 		if result.passed {
@@ -643,7 +730,15 @@ type ServeCmd struct {
 }
 
 func (s *ServeCmd) Run(globals *CLI) error {
-	srv, err := web.NewServer(s.PRDPath, s.Port)
+	// Load state store from disk for historical event data.
+	storeDir := filepath.Join(globals.WorkDir, ".ralph-wiggo", "runs")
+	store, err := state.NewMemoryStore(storeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading state: %v\n", err)
+		store = nil
+	}
+
+	srv, err := web.NewServer(s.PRDPath, s.Port, store)
 	if err != nil {
 		return fmt.Errorf("starting web server: %w", err)
 	}

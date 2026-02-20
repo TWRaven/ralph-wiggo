@@ -67,14 +67,31 @@ type MemoryStore struct {
 	mu      sync.RWMutex
 	runs    map[string]*Run
 	baseDir string // directory for JSON persistence (e.g. .ralph-wiggo/runs/)
+
+	broadMu    sync.Mutex
+	broadcasts map[string]*storyBroadcast
+}
+
+// storyBroadcast holds live event subscribers and a buffer of events published
+// so far for a single story's current iteration.
+type storyBroadcast struct {
+	events      []claude.StreamEvent
+	subscribers []*eventSubscriber
+	closed      bool
+}
+
+// eventSubscriber is a single SSE subscriber channel.
+type eventSubscriber struct {
+	ch chan claude.StreamEvent
 }
 
 // NewMemoryStore creates a new MemoryStore that persists state to the given
 // base directory. It loads any existing run history from disk.
 func NewMemoryStore(baseDir string) (*MemoryStore, error) {
 	s := &MemoryStore{
-		runs:    make(map[string]*Run),
-		baseDir: baseDir,
+		runs:       make(map[string]*Run),
+		baseDir:    baseDir,
+		broadcasts: make(map[string]*storyBroadcast),
 	}
 	if err := s.loadFromDisk(); err != nil {
 		return nil, fmt.Errorf("state: loading run history: %w", err)
@@ -223,4 +240,120 @@ func (s *MemoryStore) loadFromDisk() error {
 		s.runs[run.ID] = &run
 	}
 	return nil
+}
+
+// getBroadcast returns (or creates) the broadcast state for a story.
+// Caller must hold s.broadMu.
+func (s *MemoryStore) getBroadcast(storyID string) *storyBroadcast {
+	bc, ok := s.broadcasts[storyID]
+	if !ok {
+		bc = &storyBroadcast{}
+		s.broadcasts[storyID] = bc
+	}
+	return bc
+}
+
+// PublishEvent sends a streaming event to all live subscribers for a story and
+// stores it so late-joining subscribers receive the full history.
+func (s *MemoryStore) PublishEvent(storyID string, evt claude.StreamEvent) {
+	s.broadMu.Lock()
+	defer s.broadMu.Unlock()
+
+	bc := s.getBroadcast(storyID)
+	if bc.closed {
+		return
+	}
+
+	bc.events = append(bc.events, evt)
+	for _, sub := range bc.subscribers {
+		select {
+		case sub.ch <- evt:
+		default:
+			// Drop if subscriber is slow.
+		}
+	}
+}
+
+// Subscribe returns all events published so far for a story, a channel for
+// future live events, and an unsubscribe function. The channel is closed when
+// CloseSubscribers is called for the story.
+func (s *MemoryStore) Subscribe(storyID string) ([]claude.StreamEvent, <-chan claude.StreamEvent, func()) {
+	s.broadMu.Lock()
+	defer s.broadMu.Unlock()
+
+	bc := s.getBroadcast(storyID)
+
+	// Snapshot existing events.
+	snapshot := make([]claude.StreamEvent, len(bc.events))
+	copy(snapshot, bc.events)
+
+	sub := &eventSubscriber{ch: make(chan claude.StreamEvent, 64)}
+	if bc.closed {
+		close(sub.ch)
+		return snapshot, sub.ch, func() {}
+	}
+
+	bc.subscribers = append(bc.subscribers, sub)
+
+	unsub := func() {
+		s.broadMu.Lock()
+		defer s.broadMu.Unlock()
+		subs := bc.subscribers
+		for i, ss := range subs {
+			if ss == sub {
+				bc.subscribers = append(subs[:i], subs[i+1:]...)
+				break
+			}
+		}
+	}
+
+	return snapshot, sub.ch, unsub
+}
+
+// CloseSubscribers closes all subscriber channels for a story and resets the
+// broadcast buffer. Call this when the story's agent iteration is complete.
+func (s *MemoryStore) CloseSubscribers(storyID string) {
+	s.broadMu.Lock()
+	defer s.broadMu.Unlock()
+
+	bc, ok := s.broadcasts[storyID]
+	if !ok {
+		return
+	}
+
+	bc.closed = true
+	for _, sub := range bc.subscribers {
+		close(sub.ch)
+	}
+	bc.subscribers = nil
+}
+
+// ResetBroadcast clears the broadcast state for a story so it can accept new
+// subscribers for a subsequent iteration.
+func (s *MemoryStore) ResetBroadcast(storyID string) {
+	s.broadMu.Lock()
+	defer s.broadMu.Unlock()
+	delete(s.broadcasts, storyID)
+}
+
+// GetLatestSession returns the most recent agent session for a story across
+// all runs. Returns nil if no session is found.
+func (s *MemoryStore) GetLatestSession(storyID string) *AgentSession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var latest *AgentSession
+	var latestTime time.Time
+
+	for _, run := range s.runs {
+		for _, sess := range run.Stories {
+			if sess.StoryID == storyID {
+				if latest == nil || run.StartTime.After(latestTime) {
+					latest = sess
+					latestTime = run.StartTime
+				}
+			}
+		}
+	}
+	return latest
 }

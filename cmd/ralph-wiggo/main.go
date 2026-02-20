@@ -13,6 +13,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
+	"github.com/radvoogh/ralph-wiggo/internal/config"
 	"github.com/radvoogh/ralph-wiggo/internal/git"
 	"github.com/radvoogh/ralph-wiggo/internal/planner"
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
@@ -36,10 +37,16 @@ type CLI struct {
 	Convert ConvertCmd `cmd:"" help:"Convert a PRD markdown file to prd.json."`
 	Serve   ServeCmd   `cmd:"" help:"Start the web dashboard server."`
 	Full    FullCmd    `cmd:"" help:"Full workflow: PRD generation, conversion, and agent loop."`
+
+	// fileConfig holds settings loaded from .ralph-wiggo.yaml (not a CLI flag).
+	fileConfig config.Config `kong:"-"`
 }
 
-// AfterApply registers any prompt overrides before subcommands run.
+// AfterApply loads the config file and registers prompt overrides before
+// subcommands run. Config file values are applied as defaults; CLI flags
+// that were explicitly set take precedence.
 func (c *CLI) AfterApply() error {
+	// Register prompt overrides.
 	for _, override := range c.PromptOverrides {
 		parts := strings.SplitN(override, "=", 2)
 		if len(parts) != 2 {
@@ -47,6 +54,26 @@ func (c *CLI) AfterApply() error {
 		}
 		prompts.SetOverride(parts[0], parts[1])
 	}
+
+	// Load config file from working directory.
+	cfg, err := config.Load(c.WorkDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading %s: %v\n", config.DefaultConfigFile, err)
+		return nil
+	}
+	c.fileConfig = cfg
+
+	// Apply config file values where CLI flags are still at their defaults.
+	if cfg.Model != "" && c.Model == "claude-sonnet-4-6" {
+		c.Model = cfg.Model
+	}
+	if cfg.MaxBudget != 0 && c.MaxBudget == 0 {
+		c.MaxBudget = cfg.MaxBudget
+	}
+	if cfg.MaxTurns != 0 && c.MaxTurns == 50 {
+		c.MaxTurns = cfg.MaxTurns
+	}
+
 	return nil
 }
 
@@ -56,9 +83,16 @@ type RunCmd struct {
 	Parallelism   string `help:"Parallelism mode: sequential, parallel-N, or auto." default:"sequential"`
 	MaxIterations int    `help:"Maximum iterations per story before skipping." default:"10" name:"max-iterations"`
 	UI            bool   `help:"Start web dashboard alongside the agent loop."`
+	DryRun        bool   `help:"Print what would be executed without invoking Claude." name:"dry-run"`
 }
 
 func (r *RunCmd) Run(globals *CLI) error {
+	// Apply config file overrides for subcommand-specific settings.
+	cfg := globals.fileConfig
+	if cfg.Parallelism != "" && r.Parallelism == "sequential" {
+		r.Parallelism = cfg.Parallelism
+	}
+
 	progressPath := filepath.Join(filepath.Dir(r.PRDPath), "progress.txt")
 
 	// Load the PRD.
@@ -79,6 +113,28 @@ func (r *RunCmd) Run(globals *CLI) error {
 
 	fmt.Printf("Loaded PRD: %s (%d stories)\n", p.Project, len(p.UserStories))
 
+	// Dry-run mode: print what would be executed without invoking Claude.
+	if r.DryRun {
+		fmt.Println("\n[dry-run] Would execute with the following settings:")
+		fmt.Printf("  Branch:      %s\n", p.BranchName)
+		fmt.Printf("  Model:       %s\n", globals.Model)
+		fmt.Printf("  Max turns:   %d\n", globals.MaxTurns)
+		if globals.MaxBudget > 0 {
+			fmt.Printf("  Max budget:  $%.2f\n", globals.MaxBudget)
+		}
+		fmt.Printf("  Parallelism: %s\n", r.Parallelism)
+		fmt.Printf("  Max iters:   %d\n", r.MaxIterations)
+		fmt.Println("\n[dry-run] Stories to execute:")
+		for _, s := range p.UserStories {
+			status := "pending"
+			if s.Passes {
+				status = "passed"
+			}
+			fmt.Printf("  %s [%s] %s\n", s.ID, status, s.Title)
+		}
+		return nil
+	}
+
 	// Create or check out the feature branch.
 	if err := git.CreateOrCheckoutBranch(p.BranchName); err != nil {
 		return fmt.Errorf("switching to branch %q: %w", p.BranchName, err)
@@ -94,6 +150,12 @@ func (r *RunCmd) Run(globals *CLI) error {
 	agentPrompt, err := prompts.Get("prompt.md")
 	if err != nil {
 		return fmt.Errorf("loading prompt.md: %w", err)
+	}
+
+	// Determine allowed tools (config file override or default).
+	allowedTools := []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"}
+	if len(globals.fileConfig.AllowedTools) > 0 {
+		allowedTools = globals.fileConfig.AllowedTools
 	}
 
 	// Create state store for event tracking and persistence.
@@ -121,7 +183,11 @@ func (r *RunCmd) Run(globals *CLI) error {
 
 	// Start web dashboard if --ui flag is set.
 	if r.UI {
-		srv, err := web.NewServer(r.PRDPath, 8484, store)
+		uiPort := 8484
+		if globals.fileConfig.Port != 0 {
+			uiPort = globals.fileConfig.Port
+		}
+		srv, err := web.NewServer(r.PRDPath, uiPort, store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: starting web dashboard: %v\n", err)
 		} else {
@@ -171,7 +237,7 @@ func (r *RunCmd) Run(globals *CLI) error {
 			iterNum := storyIterations[story.ID]
 			fmt.Printf("\n--- %s - %s (iteration %d/%d) ---\n", story.ID, story.Title, iterNum, r.MaxIterations)
 
-			result := runSingleAgent(ctx, exec, story, agentPrompt, globals, r.PRDPath, store)
+			result := runSingleAgent(ctx, exec, story, agentPrompt, globals, r.PRDPath, store, allowedTools)
 
 			p, err = processStoryResult(result, r.PRDPath, progressPath, p, iterNum, r.MaxIterations, storyIterations, skippedStories, store, runID)
 			if err != nil {
@@ -179,7 +245,7 @@ func (r *RunCmd) Run(globals *CLI) error {
 			}
 		} else {
 			// Parallel execution — run agents in separate worktrees.
-			results := runParallelAgents(ctx, exec, eligible, agentPrompt, globals, r.PRDPath, storyIterations, r.MaxIterations, store)
+			results := runParallelAgents(ctx, exec, eligible, agentPrompt, globals, r.PRDPath, storyIterations, r.MaxIterations, store, allowedTools)
 
 			p, err = processParallelResults(results, r.PRDPath, progressPath, p, r.MaxIterations, storyIterations, skippedStories, store, runID)
 			if err != nil {
@@ -266,7 +332,7 @@ type storyResult struct {
 
 // runSingleAgent runs a Claude agent for a single story in the current working
 // directory and returns the result. Events are published to the store for SSE.
-func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserStory, agentPrompt string, globals *CLI, prdPath string, store *state.MemoryStore) storyResult {
+func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserStory, agentPrompt string, globals *CLI, prdPath string, store *state.MemoryStore, allowedTools []string) storyResult {
 	storyPrompt := buildStoryPrompt(story)
 
 	cfg := claude.RunConfig{
@@ -276,7 +342,7 @@ func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserS
 		MaxBudgetUSD:       globals.MaxBudget,
 		WorkDir:            globals.WorkDir,
 		AppendSystemPrompt: agentPrompt,
-		AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
+		AllowedTools:       allowedTools,
 		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
@@ -377,7 +443,7 @@ func processStoryResult(result storyResult, prdPath, progressPath string, p *prd
 
 // runParallelAgents runs Claude agents concurrently in separate git worktrees,
 // one per story. Returns all results after all agents complete.
-func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*prd.UserStory, agentPrompt string, globals *CLI, prdPath string, storyIterations map[string]int, maxIterations int, store *state.MemoryStore) []storyResult {
+func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*prd.UserStory, agentPrompt string, globals *CLI, prdPath string, storyIterations map[string]int, maxIterations int, store *state.MemoryStore, allowedTools []string) []storyResult {
 	worktreeBase := filepath.Join(globals.WorkDir, ".ralph-wiggo", "worktrees")
 
 	fmt.Printf("\n=== Parallel batch: %d stories ===\n", len(stories))
@@ -452,7 +518,7 @@ func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*pr
 				MaxBudgetUSD:       globals.MaxBudget,
 				WorkDir:            wtDir,
 				AppendSystemPrompt: agentPrompt,
-				AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
+				AllowedTools:       allowedTools,
 				AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 			}
 
@@ -730,6 +796,11 @@ type ServeCmd struct {
 }
 
 func (s *ServeCmd) Run(globals *CLI) error {
+	// Apply config file override for port.
+	if globals.fileConfig.Port != 0 && s.Port == 8484 {
+		s.Port = globals.fileConfig.Port
+	}
+
 	// Load state store from disk for historical event data.
 	storeDir := filepath.Join(globals.WorkDir, ".ralph-wiggo", "runs")
 	store, err := state.NewMemoryStore(storeDir)

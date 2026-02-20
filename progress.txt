@@ -40,6 +40,9 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `git.MergeFrom` + `git.AbortMerge` handle merge conflicts gracefully in parallel mode
 - `storyResult` struct collects agent outcome + worktree info for deferred merge-back
 - `printParallelEvent` prefixes output with `[story-id]` to distinguish concurrent agent output
+- `internal/config` package: `Load(dir)` reads `.ralph-wiggo.yaml`, returns zero Config if file doesn't exist — no error on missing file
+- Config file values applied in `AfterApply` (globals) and subcommand `Run` methods (subcommand-specific) — CLI flags at defaults get overridden by config
+- `allowedTools` threaded as parameter to `runSingleAgent`/`runParallelAgents` — configurable via `allowedTools` in YAML
 - `internal/state` package: `MemoryStore` implements `RunStore` interface — in-memory map guarded by `sync.RWMutex`, persisted as JSON files in `.ralph-wiggo/runs/`
 - State types: `Run` (top-level), `AgentSession` (per-story), `Iteration` (per-attempt with events)
 - `NewMemoryStore(baseDir)` loads existing JSON files from disk on startup — handles nonexistent dirs gracefully
@@ -297,4 +300,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Flag naming avoids conflicts: `--output` for PRD markdown path (matches PRDCmd), `--json-output` for prd.json path (matches ConvertCmd default)
   - Kong struct tags: `name:"json-output"` maps to `--json-output` CLI flag
   - macOS dyld `missing LC_UUID` errors when running `go run` or built binaries — environment issue, not code; `go build/vet/test` still work correctly
+---
+
+## 2026-02-20 - US-021
+- Implemented: Configuration system with YAML config file (`.ralph-wiggo.yaml`) and CLI flag overrides — new `internal/config` package for YAML loading, `--dry-run` flag on run command, config file values for model/maxBudget/maxTurns/parallelism/allowedTools/port applied as defaults that CLI flags override
+- Files changed: go.mod, go.sum, internal/config/config.go (new), internal/config/config_test.go (new), cmd/ralph-wiggo/main.go (AfterApply config loading, RunCmd dry-run flag + config overrides, ServeCmd port config, allowedTools threading through agent functions)
+- **Learnings for future iterations:**
+  - Kong doesn't expose whether a flag was explicitly set vs. defaulted — use heuristic: if value == default, config file wins; if value != default, CLI flag wins
+  - `kong:"-"` tag skips a struct field from CLI parsing — useful for internal state like `fileConfig`
+  - Config file overrides for subcommand-specific settings (parallelism, port) must be applied in the subcommand's `Run` method, not in the global `AfterApply`, because kong hasn't populated subcommand fields yet when `AfterApply` runs on the parent struct
+  - `gopkg.in/yaml.v3` uses struct tags like `yaml:"fieldName"` — camelCase convention in YAML matches the config struct field naming
+  - Thread configurable values (like `allowedTools`) as function parameters rather than accessing global state — keeps functions testable and explicit
 ---

@@ -347,7 +347,7 @@
         "go vet ./... passes"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": "Use a lightweight YAML library like gopkg.in/yaml.v3"
     }
   ]

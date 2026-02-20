@@ -19,6 +19,9 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `internal/prd` package: `PRD` and `UserStory` types with JSON tags, `LoadPRD`/`SavePRD` for file I/O, `Validate` for consistency checks
 - `prd.JSONSchema` constant provides the JSON schema string for use with `claude --json-schema`
 - `SavePRD` appends trailing newline for clean file output
+- Subcommand implementations: load embedded skill via `prompts.Get()`, build `claude.RunConfig`, call executor method
+- `signal.NotifyContext` for Ctrl+C handling in subcommands that spawn Claude
+- `slugify` helper in main.go for kebab-case filename generation from user input
 
 ---
 
@@ -72,4 +75,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `SavePRD` appends a trailing newline for cleaner file output and git diffs
   - `json.MarshalIndent` with 2-space indent matches the existing prd.json formatting convention
   - Test helper `testPRD()` returns a standard PRD fixture — reuse for consistency
+---
+
+## 2026-02-20 - US-006
+- Implemented: PRD generation command (`ralph-wiggo prd <description>`) that launches Claude in interactive mode with embedded prd-skill.md as system prompt
+- Files changed: cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - Subcommand pattern: load skill content via `prompts.Get()`, build `RunConfig` with `AppendSystemPrompt`, call `exec.RunInteractive`
+  - Default output path uses `slugify()` to convert description to kebab-case: `tasks/prd-<slug>.md`
+  - Include output path in the prompt text so Claude knows where to save the file
+  - `signal.NotifyContext` wraps the context for graceful Ctrl+C handling during interactive sessions
+  - `RunInteractive` with `cfg.Prompt` set uses `-p` to start the session with an initial message while still allowing interactive follow-up
 ---

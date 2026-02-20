@@ -98,7 +98,7 @@
         "go vet ./... passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "The interactive mode lets Claude ask clarifying questions to the user. The PRD skill instructs Claude to save the file."
     },
     {

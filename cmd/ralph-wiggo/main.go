@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/alecthomas/kong"
+	"github.com/radvoogh/ralph-wiggo/internal/claude"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
 )
 
@@ -56,7 +59,40 @@ type PRDCmd struct {
 }
 
 func (p *PRDCmd) Run(globals *CLI) error {
-	fmt.Println("prd: not yet implemented")
+	skillContent, err := prompts.Get("prd-skill.md")
+	if err != nil {
+		return fmt.Errorf("loading prd-skill.md: %w", err)
+	}
+
+	// Determine output path. Default to tasks/prd-<feature>.md using a
+	// kebab-case slug derived from the description.
+	outputPath := p.Output
+	if outputPath == "" {
+		outputPath = "tasks/prd-" + slugify(p.Description) + ".md"
+	}
+
+	// Build a prompt that includes the description and output location.
+	prompt := fmt.Sprintf(
+		"Generate a PRD for the following feature:\n\n%s\n\nSave the PRD to: %s",
+		p.Description, outputPath,
+	)
+
+	exec := claude.NewExecutor()
+	cfg := claude.RunConfig{
+		Prompt:             prompt,
+		Model:              globals.Model,
+		MaxTurns:           globals.MaxTurns,
+		MaxBudgetUSD:       globals.MaxBudget,
+		WorkDir:            globals.WorkDir,
+		AppendSystemPrompt: skillContent,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	if err := exec.RunInteractive(ctx, cfg); err != nil {
+		return fmt.Errorf("prd generation: %w", err)
+	}
 	return nil
 }
 
@@ -91,6 +127,27 @@ type FullCmd struct {
 func (f *FullCmd) Run(globals *CLI) error {
 	fmt.Println("full: not yet implemented")
 	return nil
+}
+
+// slugify converts a string to a kebab-case slug suitable for filenames.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	prev := '-'
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prev = r
+		default:
+			if prev != '-' {
+				b.WriteRune('-')
+				prev = '-'
+			}
+		}
+	}
+	result := b.String()
+	return strings.Trim(result, "-")
 }
 
 func main() {

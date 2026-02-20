@@ -44,6 +44,11 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - State types: `Run` (top-level), `AgentSession` (per-story), `Iteration` (per-attempt with events)
 - `NewMemoryStore(baseDir)` loads existing JSON files from disk on startup — handles nonexistent dirs gracefully
 - `AddIteration` auto-creates `AgentSession` if not found, updates session status from iteration outcome
+- `internal/web` package: `Server` struct wraps `http.Server`, reads PRD on each request for live data
+- Web templates embedded via `go:embed` in `internal/web/templates/*.html`, static files in `internal/web/static/*`
+- htmx polling: `hx-get="/api/stories"` with `hx-trigger="every 2s"` on a div that wraps the dynamic content
+- `NewServer(prdPath, port)` sets up routes, parses templates, returns `*Server` — call `Start()` for background or `ListenAndServe()` for blocking
+- Dashboard partial ("stories" template) includes progress bar + story table — polled as a unit so both update together
 
 ---
 
@@ -217,4 +222,17 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `loadFromDisk` handles nonexistent base directory with `os.IsNotExist` — no error on first run
   - `ListRuns` returns sorted by start time descending (most recent first) — useful for UI display
   - 11 unit tests covering: save/get/list CRUD, add iteration with auto-session creation, disk persistence round-trip, error cases for not-found, empty dir, overwrite
+---
+
+## 2026-02-20 - US-016
+- Implemented: Web server setup and dashboard layout — new `internal/web` package with HTTP server, go:embed templates/static files, htmx polling dashboard; wired into `serve` and `run --ui` commands
+- Files changed: internal/web/server.go, internal/web/templates/dashboard.html, internal/web/templates/stories.html, internal/web/static/style.css, internal/web/static/htmx.min.js, cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - `go:embed` in `internal/web` embeds both `static/*` and `templates/*.html` — separate embed.FS variables for each
+  - `fs.Sub` strips the prefix from embedded FS — needed for `http.FileServer` to serve at `/static/`
+  - `template.ParseFS` with glob pattern loads all templates from embedded FS — named templates via `{{define}}` work across files
+  - Dashboard uses htmx `hx-get` + `hx-trigger="every 2s"` for polling — entire story list + progress bar updated as one partial
+  - `Server.Start()` runs in a goroutine for non-blocking use (run --ui); `ListenAndServe()` blocks for standalone serve
+  - PRD is re-read from disk on every request — no shared state needed between web server and agent loop
+  - `http.ServeMux` with exact `/` path check in handler prevents catch-all behavior
 ---

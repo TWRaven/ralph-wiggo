@@ -17,6 +17,7 @@ import (
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
 	"github.com/radvoogh/ralph-wiggo/internal/progress"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
+	"github.com/radvoogh/ralph-wiggo/internal/web"
 )
 
 // CLI defines the top-level command structure for ralph-wiggo.
@@ -91,6 +92,19 @@ func (r *RunCmd) Run(globals *CLI) error {
 	agentPrompt, err := prompts.Get("prompt.md")
 	if err != nil {
 		return fmt.Errorf("loading prompt.md: %w", err)
+	}
+
+	// Start web dashboard if --ui flag is set.
+	if r.UI {
+		srv, err := web.NewServer(r.PRDPath, 8484)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: starting web dashboard: %v\n", err)
+		} else {
+			if err := srv.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: web dashboard: %v\n", err)
+			}
+			defer srv.Shutdown(context.Background())
+		}
 	}
 
 	exec := claude.NewExecutor()
@@ -624,12 +638,25 @@ func (c *ConvertCmd) Run(globals *CLI) error {
 
 // ServeCmd implements the 'serve' subcommand.
 type ServeCmd struct {
-	Port int `help:"Port for the web dashboard." default:"8484"`
+	Port    int    `help:"Port for the web dashboard." default:"8484"`
+	PRDPath string `help:"Path to prd.json." default:"prd.json" name:"prd"`
 }
 
 func (s *ServeCmd) Run(globals *CLI) error {
-	fmt.Println("serve: not yet implemented")
-	return nil
+	srv, err := web.NewServer(s.PRDPath, s.Port)
+	if err != nil {
+		return fmt.Errorf("starting web server: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		srv.Shutdown(context.Background())
+	}()
+
+	return srv.ListenAndServe()
 }
 
 // FullCmd implements the 'full' subcommand.

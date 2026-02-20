@@ -1,0 +1,35 @@
+{{define "stories"}}
+<div class="subtitle">branch: {{.BranchName}} &middot; {{.Passed}}/{{.Total}} stories passed</div>
+
+<div class="progress-bar">
+  <div class="progress-fill" style="width:{{.Percent}}%"></div>
+  <div class="progress-text">{{.Percent}}%</div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Title</th>
+      <th>Priority</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Stories}}
+    <tr>
+      <td class="story-id">{{.ID}}</td>
+      <td>{{.Title}}</td>
+      <td>{{.Priority}}</td>
+      <td>
+        {{if .Passes}}
+          <span class="badge badge-passed">passed</span>
+        {{else}}
+          <span class="badge badge-pending">pending</span>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

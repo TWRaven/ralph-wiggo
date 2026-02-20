@@ -266,7 +266,7 @@
         "go vet ./... passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "Keep the UI simple — monospace fonts for code, color-coded status badges, dark-friendly. No JS frameworks beyond htmx."
     },
     {

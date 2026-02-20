@@ -35,6 +35,11 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - After PRD reload, story pointers are stale — capture `storyID` and `storyTitle` before reloading
 - `internal/progress` package: `InitIfNeeded` creates header, `AppendEntry` logs iterations, `ArchiveIfBranchChanged` moves old run files to `archive/`
 - Archive checks progress.txt `Branch:` header vs current PRD branchName — compares file header, not PRD file contents
+- Parallel execution: worktrees created at `.ralph-wiggo/worktrees/<story-id>/`, branches named `worktree-<story-id>`
+- Parallel results merged sequentially back to feature branch after all agents complete — avoids concurrent git ops on main repo
+- `git.MergeFrom` + `git.AbortMerge` handle merge conflicts gracefully in parallel mode
+- `storyResult` struct collects agent outcome + worktree info for deferred merge-back
+- `printParallelEvent` prefixes output with `[story-id]` to distinguish concurrent agent output
 
 ---
 
@@ -183,4 +188,17 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Archive directory naming: `archive/YYYY-MM-DD-<feature-name>/` where feature-name is the old branchName with `ralph/` prefix stripped
   - Collect events in a `[]claude.StreamEvent` slice during the streaming loop — pass to `AppendEntry` after determining pass/fail
   - `progressPath` is derived from `filepath.Dir(r.PRDPath)` + "progress.txt" — keeps progress.txt alongside prd.json
+---
+
+## 2026-02-20 - US-014
+- Implemented: Parallel execution with worktrees — when planner returns multiple stories (parallel-N or auto mode), the run loop creates git worktrees in `.ralph-wiggo/worktrees/<story-id>/`, spawns concurrent Claude agents (one per worktree), then merges results back sequentially
+- Files changed: internal/git/git.go (added MergeFrom, AbortMerge, DeleteBranch), cmd/ralph-wiggo/main.go (refactored run loop with runSingleAgent, runParallelAgents, processStoryResult, processParallelResults helpers)
+- **Learnings for future iterations:**
+  - Refactored the monolithic run loop into composable helpers: `runSingleAgent` (single-story), `runParallelAgents` (multi-story with worktrees), `processStoryResult`, `processParallelResults`
+  - `storyResult` struct captures storyID, storyTitle, passed, events, worktreeBranch, worktreePath, iterNum — all info needed for deferred merge-back
+  - Parallel agents use `sync.WaitGroup` + mutex-protected results slice — simpler than errgroup since we want all agents to run to completion
+  - Worktree cleanup happens in a deferred function after `wg.Wait()` — ensures cleanup even if merging fails
+  - `git.MergeFrom` + `git.AbortMerge` handle merge conflicts: abort restores working tree so subsequent merges can proceed
+  - `printParallelEvent` prefixes all output with `[story-id]` so concurrent agent output can be distinguished
+  - Sequential path (1 story) preserved as-is — parallel path only activates when planner returns >1 story
 ---

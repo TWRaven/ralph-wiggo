@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/kong"
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
@@ -124,93 +125,26 @@ func (r *RunCmd) Run(globals *CLI) error {
 			break
 		}
 
-		// In sequential mode, there is exactly one story.
-		story := eligible[0]
-		storyIterations[story.ID]++
-		iterNum := storyIterations[story.ID]
-		fmt.Printf("\n--- %s - %s (iteration %d/%d) ---\n", story.ID, story.Title, iterNum, r.MaxIterations)
+		if len(eligible) == 1 {
+			// Sequential execution — run a single agent inline.
+			story := eligible[0]
+			storyIterations[story.ID]++
+			iterNum := storyIterations[story.ID]
+			fmt.Printf("\n--- %s - %s (iteration %d/%d) ---\n", story.ID, story.Title, iterNum, r.MaxIterations)
 
-		// Build the story prompt.
-		storyPrompt := buildStoryPrompt(story)
+			result := runSingleAgent(ctx, exec, story, agentPrompt, globals, r.PRDPath)
 
-		cfg := claude.RunConfig{
-			Prompt:             storyPrompt,
-			Model:              globals.Model,
-			MaxTurns:           globals.MaxTurns,
-			MaxBudgetUSD:       globals.MaxBudget,
-			WorkDir:            globals.WorkDir,
-			AppendSystemPrompt: agentPrompt,
-			AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
-			AdditionalFlags:    []string{"--dangerously-skip-permissions"},
-		}
-
-		events, err := exec.RunStreaming(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", story.ID, err)
-			fmt.Printf("[%s] FAIL (iteration %d/%d) — could not start agent\n", story.ID, iterNum, r.MaxIterations)
-			if iterNum >= r.MaxIterations {
-				skippedStories[story.ID] = true
-				fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", story.ID, r.MaxIterations)
+			p, err = processStoryResult(result, r.PRDPath, progressPath, p, iterNum, r.MaxIterations, storyIterations, skippedStories)
+			if err != nil {
+				return err
 			}
-			continue
-		}
-
-		// Print streaming events as they arrive and collect them for progress.
-		exitedCleanly := true
-		var collectedEvents []claude.StreamEvent
-		for evt := range events {
-			printStreamEvent(evt)
-			collectedEvents = append(collectedEvents, evt)
-			if evt.Type == claude.EventError {
-				exitedCleanly = false
-			}
-		}
-
-		// Capture story info before reloading PRD (the pointer becomes stale).
-		storyID := story.ID
-		storyTitle := story.Title
-
-		// Reload PRD to pick up any changes the agent may have made.
-		p, err = prd.LoadPRD(r.PRDPath)
-		if err != nil {
-			return fmt.Errorf("reloading PRD after iteration: %w", err)
-		}
-
-		if exitedCleanly {
-			// Agent exited with code 0: find the story in the reloaded PRD and mark as passed.
-			for i := range p.UserStories {
-				if p.UserStories[i].ID == storyID {
-					p.UserStories[i].Passes = true
-					break
-				}
-			}
-			if err := prd.SavePRD(r.PRDPath, p); err != nil {
-				return fmt.Errorf("saving PRD after %s passed: %w", storyID, err)
-			}
-
-			// Append progress entry before committing.
-			if err := progress.AppendEntry(progressPath, storyID, true, collectedEvents); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
-			}
-
-			// Commit all changes including the prd.json update.
-			commitMsg := fmt.Sprintf("ralph-wiggo: %s %s [passed]", storyID, storyTitle)
-			if err := git.CommitAll(commitMsg); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: commit failed for %s: %v\n", storyID, err)
-			}
-
-			fmt.Printf("[%s] PASS (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
 		} else {
-			// Agent exited with non-zero: leave passes = false.
-			// Append progress entry for the failure.
-			if err := progress.AppendEntry(progressPath, storyID, false, collectedEvents); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
-			}
+			// Parallel execution — run agents in separate worktrees.
+			results := runParallelAgents(ctx, exec, eligible, agentPrompt, globals, r.PRDPath, storyIterations, r.MaxIterations)
 
-			fmt.Printf("[%s] FAIL (iteration %d/%d)\n", storyID, iterNum, r.MaxIterations)
-			if iterNum >= r.MaxIterations {
-				skippedStories[storyID] = true
-				fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", storyID, r.MaxIterations)
+			p, err = processParallelResults(results, r.PRDPath, progressPath, p, r.MaxIterations, storyIterations, skippedStories)
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -276,6 +210,308 @@ func printStreamEvent(evt claude.StreamEvent) {
 		}
 	case claude.EventResult:
 		fmt.Println("\n[agent finished]")
+	}
+}
+
+// storyResult holds the outcome of a single agent execution.
+type storyResult struct {
+	storyID    string
+	storyTitle string
+	passed     bool
+	events     []claude.StreamEvent
+	// For parallel execution — the worktree branch that needs merging.
+	worktreeBranch string
+	worktreePath   string
+	iterNum        int
+}
+
+// runSingleAgent runs a Claude agent for a single story in the current working
+// directory and returns the result.
+func runSingleAgent(ctx context.Context, exec *claude.Executor, story *prd.UserStory, agentPrompt string, globals *CLI, prdPath string) storyResult {
+	storyPrompt := buildStoryPrompt(story)
+
+	cfg := claude.RunConfig{
+		Prompt:             storyPrompt,
+		Model:              globals.Model,
+		MaxTurns:           globals.MaxTurns,
+		MaxBudgetUSD:       globals.MaxBudget,
+		WorkDir:            globals.WorkDir,
+		AppendSystemPrompt: agentPrompt,
+		AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
+		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
+	}
+
+	events, err := exec.RunStreaming(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", story.ID, err)
+		return storyResult{storyID: story.ID, storyTitle: story.Title, passed: false}
+	}
+
+	exitedCleanly := true
+	var collectedEvents []claude.StreamEvent
+	for evt := range events {
+		printStreamEvent(evt)
+		collectedEvents = append(collectedEvents, evt)
+		if evt.Type == claude.EventError {
+			exitedCleanly = false
+		}
+	}
+
+	return storyResult{
+		storyID:    story.ID,
+		storyTitle: story.Title,
+		passed:     exitedCleanly,
+		events:     collectedEvents,
+	}
+}
+
+// processStoryResult handles the result of a single story execution: updates
+// PRD, appends progress, and commits if passed. Returns the reloaded PRD.
+func processStoryResult(result storyResult, prdPath, progressPath string, p *prd.PRD, iterNum, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool) (*prd.PRD, error) {
+	// Reload PRD to pick up any changes the agent may have made.
+	p, err := prd.LoadPRD(prdPath)
+	if err != nil {
+		return nil, fmt.Errorf("reloading PRD after iteration: %w", err)
+	}
+
+	if result.passed {
+		for i := range p.UserStories {
+			if p.UserStories[i].ID == result.storyID {
+				p.UserStories[i].Passes = true
+				break
+			}
+		}
+		if err := prd.SavePRD(prdPath, p); err != nil {
+			return nil, fmt.Errorf("saving PRD after %s passed: %w", result.storyID, err)
+		}
+		if err := progress.AppendEntry(progressPath, result.storyID, true, result.events); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+		}
+		commitMsg := fmt.Sprintf("ralph-wiggo: %s %s [passed]", result.storyID, result.storyTitle)
+		if err := git.CommitAll(commitMsg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: commit failed for %s: %v\n", result.storyID, err)
+		}
+		fmt.Printf("[%s] PASS (iteration %d/%d)\n", result.storyID, iterNum, maxIterations)
+	} else {
+		if err := progress.AppendEntry(progressPath, result.storyID, false, result.events); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+		}
+		fmt.Printf("[%s] FAIL (iteration %d/%d)\n", result.storyID, iterNum, maxIterations)
+		if iterNum >= maxIterations {
+			skippedStories[result.storyID] = true
+			fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", result.storyID, maxIterations)
+		}
+	}
+	return p, nil
+}
+
+// runParallelAgents runs Claude agents concurrently in separate git worktrees,
+// one per story. Returns all results after all agents complete.
+func runParallelAgents(ctx context.Context, exec *claude.Executor, stories []*prd.UserStory, agentPrompt string, globals *CLI, prdPath string, storyIterations map[string]int, maxIterations int) []storyResult {
+	worktreeBase := filepath.Join(globals.WorkDir, ".ralph-wiggo", "worktrees")
+
+	fmt.Printf("\n=== Parallel batch: %d stories ===\n", len(stories))
+	for _, s := range stories {
+		fmt.Printf("  - %s: %s\n", s.ID, s.Title)
+	}
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		results []storyResult
+	)
+
+	// Ensure the worktree base directory exists.
+	if err := os.MkdirAll(worktreeBase, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error creating worktree directory: %v\n", err)
+		// Fall back to sequential-style result with all failures.
+		for _, s := range stories {
+			results = append(results, storyResult{storyID: s.ID, storyTitle: s.Title, passed: false})
+		}
+		return results
+	}
+
+	// Track all worktree paths for cleanup on context cancellation.
+	type worktreeInfo struct {
+		path   string
+		branch string
+	}
+	var (
+		wtMu      sync.Mutex
+		worktrees []worktreeInfo
+	)
+
+	for _, story := range stories {
+		storyIterations[story.ID]++
+		iterNum := storyIterations[story.ID]
+
+		wtPath := filepath.Join(worktreeBase, story.ID)
+		wtBranch := fmt.Sprintf("worktree-%s", story.ID)
+
+		fmt.Printf("\n--- %s - %s (iteration %d/%d) [parallel] ---\n", story.ID, story.Title, iterNum, maxIterations)
+
+		// Create worktree for this story.
+		if err := git.WorktreeAdd(wtPath, wtBranch); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating worktree for %s: %v\n", story.ID, err)
+			mu.Lock()
+			results = append(results, storyResult{
+				storyID: story.ID, storyTitle: story.Title, passed: false,
+				iterNum: iterNum,
+			})
+			mu.Unlock()
+			continue
+		}
+
+		wtMu.Lock()
+		worktrees = append(worktrees, worktreeInfo{path: wtPath, branch: wtBranch})
+		wtMu.Unlock()
+
+		wg.Add(1)
+		go func(s *prd.UserStory, wtDir, branch string, iter int) {
+			defer wg.Done()
+
+			storyPrompt := buildStoryPrompt(s)
+			cfg := claude.RunConfig{
+				Prompt:             storyPrompt,
+				Model:              globals.Model,
+				MaxTurns:           globals.MaxTurns,
+				MaxBudgetUSD:       globals.MaxBudget,
+				WorkDir:            wtDir,
+				AppendSystemPrompt: agentPrompt,
+				AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
+				AdditionalFlags:    []string{"--dangerously-skip-permissions"},
+			}
+
+			events, err := exec.RunStreaming(ctx, cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", s.ID, err)
+				mu.Lock()
+				results = append(results, storyResult{
+					storyID: s.ID, storyTitle: s.Title, passed: false,
+					worktreeBranch: branch, worktreePath: wtDir, iterNum: iter,
+				})
+				mu.Unlock()
+				return
+			}
+
+			exitedCleanly := true
+			var collectedEvents []claude.StreamEvent
+			for evt := range events {
+				// In parallel mode, prefix output with story ID for clarity.
+				printParallelEvent(s.ID, evt)
+				collectedEvents = append(collectedEvents, evt)
+				if evt.Type == claude.EventError {
+					exitedCleanly = false
+				}
+			}
+
+			mu.Lock()
+			results = append(results, storyResult{
+				storyID:        s.ID,
+				storyTitle:     s.Title,
+				passed:         exitedCleanly,
+				events:         collectedEvents,
+				worktreeBranch: branch,
+				worktreePath:   wtDir,
+				iterNum:        iter,
+			})
+			mu.Unlock()
+		}(story, wtPath, wtBranch, iterNum)
+	}
+
+	// Wait for all agents to complete.
+	wg.Wait()
+
+	// Cleanup worktrees (always, regardless of success/failure).
+	defer func() {
+		for _, wt := range worktrees {
+			if err := git.WorktreeRemove(wt.path); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", wt.path, err)
+			}
+			if err := git.DeleteBranch(wt.branch); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: deleting branch %s: %v\n", wt.branch, err)
+			}
+		}
+		// Clean up the worktree base directory if empty.
+		_ = os.Remove(worktreeBase)
+	}()
+
+	return results
+}
+
+// processParallelResults handles the results of parallel story executions:
+// merges worktree branches, updates PRD, appends progress, and commits.
+func processParallelResults(results []storyResult, prdPath, progressPath string, p *prd.PRD, maxIterations int, storyIterations map[string]int, skippedStories map[string]bool) (*prd.PRD, error) {
+	for _, result := range results {
+		if result.passed && result.worktreeBranch != "" {
+			// Merge the worktree branch into the current branch.
+			if err := git.MergeFrom(result.worktreeBranch); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] merge conflict — marking as failed: %v\n", result.storyID, err)
+				// Abort the merge to restore working tree.
+				_ = git.AbortMerge()
+				result.passed = false
+			}
+		}
+
+		// Reload PRD after merge to pick up changes.
+		var err error
+		p, err = prd.LoadPRD(prdPath)
+		if err != nil {
+			return nil, fmt.Errorf("reloading PRD after %s: %w", result.storyID, err)
+		}
+
+		if result.passed {
+			for i := range p.UserStories {
+				if p.UserStories[i].ID == result.storyID {
+					p.UserStories[i].Passes = true
+					break
+				}
+			}
+			if err := prd.SavePRD(prdPath, p); err != nil {
+				return nil, fmt.Errorf("saving PRD after %s passed: %w", result.storyID, err)
+			}
+			if err := progress.AppendEntry(progressPath, result.storyID, true, result.events); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+			}
+			commitMsg := fmt.Sprintf("ralph-wiggo: %s %s [passed]", result.storyID, result.storyTitle)
+			if err := git.CommitAll(commitMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: commit failed for %s: %v\n", result.storyID, err)
+			}
+			fmt.Printf("[%s] PASS (iteration %d/%d)\n", result.storyID, result.iterNum, maxIterations)
+		} else {
+			if err := progress.AppendEntry(progressPath, result.storyID, false, result.events); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: updating progress.txt: %v\n", err)
+			}
+			fmt.Printf("[%s] FAIL (iteration %d/%d)\n", result.storyID, result.iterNum, maxIterations)
+			if result.iterNum >= maxIterations {
+				skippedStories[result.storyID] = true
+				fmt.Printf("[%s] Skipping — exceeded max iterations (%d)\n", result.storyID, maxIterations)
+			}
+		}
+	}
+	return p, nil
+}
+
+// printParallelEvent prints a streaming event prefixed with the story ID.
+func printParallelEvent(storyID string, evt claude.StreamEvent) {
+	prefix := fmt.Sprintf("[%s] ", storyID)
+	switch evt.Type {
+	case claude.EventAssistant:
+		if evt.Message != "" {
+			fmt.Printf("%s%s", prefix, evt.Message)
+		}
+	case claude.EventToolUse:
+		fmt.Printf("%s[tool: %s]\n", prefix, evt.ToolName)
+	case claude.EventToolResult:
+		fmt.Printf("%s[tool result]\n", prefix)
+	case claude.EventError:
+		fmt.Fprintf(os.Stderr, "%s[error] %s\n", prefix, evt.Message)
+	case claude.EventInit:
+		if evt.SessionID != "" {
+			fmt.Printf("%s[session: %s]\n", prefix, evt.SessionID)
+		}
+	case claude.EventResult:
+		fmt.Printf("%s[agent finished]\n", prefix)
 	}
 }
 

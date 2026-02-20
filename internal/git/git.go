@@ -61,6 +61,31 @@ func WorktreeRemove(path string) error {
 	return nil
 }
 
+// MergeFrom merges the given branch into the currently checked-out branch.
+// Returns an error if merge conflicts occur.
+func MergeFrom(branch string) error {
+	_, err := run("merge", branch, "--no-edit")
+	if err != nil {
+		return fmt.Errorf("merge from %q: %w", branch, err)
+	}
+	return nil
+}
+
+// AbortMerge aborts an in-progress merge, restoring the working tree.
+func AbortMerge() error {
+	_, err := run("merge", "--abort")
+	return err
+}
+
+// DeleteBranch force-deletes a local branch.
+func DeleteBranch(name string) error {
+	_, err := run("branch", "-D", name)
+	if err != nil {
+		return fmt.Errorf("delete branch %q: %w", name, err)
+	}
+	return nil
+}
+
 // CommitAll stages all changes (tracked and untracked) and commits with the
 // given message.
 func CommitAll(message string) error {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
+	"github.com/radvoogh/ralph-wiggo/internal/prd"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
 )
 
@@ -103,7 +105,59 @@ type ConvertCmd struct {
 }
 
 func (c *ConvertCmd) Run(globals *CLI) error {
-	fmt.Println("convert: not yet implemented")
+	// Load the ralph-skill.md content for the system prompt.
+	skillContent, err := prompts.Get("ralph-skill.md")
+	if err != nil {
+		return fmt.Errorf("loading ralph-skill.md: %w", err)
+	}
+
+	// Read the PRD markdown file.
+	prdContent, err := os.ReadFile(c.PRDFile)
+	if err != nil {
+		return fmt.Errorf("reading PRD file %q: %w", c.PRDFile, err)
+	}
+
+	// Build a prompt with the PRD content.
+	prompt := fmt.Sprintf(
+		"Convert the following PRD markdown into the prd.json format.\n\n%s",
+		string(prdContent),
+	)
+
+	exec := claude.NewExecutor()
+	cfg := claude.RunConfig{
+		Prompt:             prompt,
+		Model:              globals.Model,
+		MaxTurns:           globals.MaxTurns,
+		MaxBudgetUSD:       globals.MaxBudget,
+		WorkDir:            globals.WorkDir,
+		AppendSystemPrompt: skillContent,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	result, err := exec.RunJSON(ctx, cfg, prd.JSONSchema)
+	if err != nil {
+		return fmt.Errorf("prd conversion: %w", err)
+	}
+
+	// Parse the result into a PRD struct to validate it.
+	var parsedPRD prd.PRD
+	if err := json.Unmarshal(result, &parsedPRD); err != nil {
+		return fmt.Errorf("parsing conversion result: %w", err)
+	}
+
+	// Validate and print warnings (but don't fail).
+	if err := prd.Validate(&parsedPRD); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: validation issue: %v\n", err)
+	}
+
+	// Save the validated PRD.
+	if err := prd.SavePRD(c.Output, &parsedPRD); err != nil {
+		return fmt.Errorf("saving prd.json: %w", err)
+	}
+
+	fmt.Printf("Wrote %s (%d stories)\n", c.Output, len(parsedPRD.UserStories))
 	return nil
 }
 

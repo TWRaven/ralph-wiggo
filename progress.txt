@@ -87,3 +87,13 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `signal.NotifyContext` wraps the context for graceful Ctrl+C handling during interactive sessions
   - `RunInteractive` with `cfg.Prompt` set uses `-p` to start the session with an initial message while still allowing interactive follow-up
 ---
+
+## 2026-02-20 - US-007
+- Implemented: PRD-to-JSON conversion command (`ralph-wiggo convert <prd-file.md>`) that reads a markdown PRD, sends it to Claude via RunJSON with ralph-skill.md as system prompt and prd.JSONSchema, validates the result, and writes prd.json
+- Files changed: cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - Convert command follows same pattern as PRD command: load skill via `prompts.Get()`, build `RunConfig`, call executor
+  - `RunJSON` with `prd.JSONSchema` constrains Claude output to valid PRD structure — parse with `json.Unmarshal` into `prd.PRD`
+  - Validation warnings are printed to stderr but don't fail the command — lets the user see issues without blocking output
+  - `prd.SavePRD` handles indented formatting and trailing newline — always use it instead of raw file writes
+---

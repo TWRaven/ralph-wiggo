@@ -22,6 +22,8 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - Subcommand implementations: load embedded skill via `prompts.Get()`, build `claude.RunConfig`, call executor method
 - `signal.NotifyContext` for Ctrl+C handling in subcommands that spawn Claude
 - `slugify` helper in main.go for kebab-case filename generation from user input
+- `internal/planner` package: `NextStories(prd, mode)` returns `[]*prd.UserStory` — pointers into the PRD slice so stories can be mutated in place
+- Planner modes: "sequential" (single story), "parallel-N" (up to N stories), "auto" (future US-009)
 
 ---
 
@@ -96,4 +98,14 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `RunJSON` with `prd.JSONSchema` constrains Claude output to valid PRD structure — parse with `json.Unmarshal` into `prd.PRD`
   - Validation warnings are printed to stderr but don't fail the command — lets the user see issues without blocking output
   - `prd.SavePRD` handles indented formatting and trailing newline — always use it instead of raw file writes
+---
+
+## 2026-02-20 - US-008
+- Implemented: Story planner package (internal/planner) with NextStories function supporting sequential and parallel-N modes
+- Files changed: internal/planner/planner.go, internal/planner/planner_test.go
+- **Learnings for future iterations:**
+  - `NextStories` returns `[]*prd.UserStory` — pointers into the PRD's slice, so callers can mutate stories in place
+  - `incompleteByPriority` helper filters and sorts — reusable for future modes (e.g. auto mode in US-009)
+  - Parallel mode parses N from "parallel-N" string format using `strings.TrimPrefix` + `strconv.Atoi`
+  - Returns error for unknown modes — future modes (like "auto") will be added in US-009
 ---

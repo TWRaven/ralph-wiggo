@@ -40,6 +40,10 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `git.MergeFrom` + `git.AbortMerge` handle merge conflicts gracefully in parallel mode
 - `storyResult` struct collects agent outcome + worktree info for deferred merge-back
 - `printParallelEvent` prefixes output with `[story-id]` to distinguish concurrent agent output
+- `internal/state` package: `MemoryStore` implements `RunStore` interface — in-memory map guarded by `sync.RWMutex`, persisted as JSON files in `.ralph-wiggo/runs/`
+- State types: `Run` (top-level), `AgentSession` (per-story), `Iteration` (per-attempt with events)
+- `NewMemoryStore(baseDir)` loads existing JSON files from disk on startup — handles nonexistent dirs gracefully
+- `AddIteration` auto-creates `AgentSession` if not found, updates session status from iteration outcome
 
 ---
 
@@ -201,4 +205,16 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `git.MergeFrom` + `git.AbortMerge` handle merge conflicts: abort restores working tree so subsequent merges can proceed
   - `printParallelEvent` prefixes all output with `[story-id]` so concurrent agent output can be distinguished
   - Sequential path (1 story) preserved as-is — parallel path only activates when planner returns >1 story
+---
+
+## 2026-02-20 - US-015
+- Implemented: State management package (internal/state) with Run, Iteration, AgentSession types, RunStore interface, in-memory MemoryStore implementation with sync.RWMutex, JSON file persistence to .ralph-wiggo/runs/, and startup disk loading
+- Files changed: internal/state/state.go, internal/state/state_test.go
+- **Learnings for future iterations:**
+  - `MemoryStore` uses `sync.RWMutex` — read ops use `RLock`, write ops use `Lock`
+  - `persistRun` is called by both `SaveRun` and `AddIteration` — always writes the full run JSON (not incremental)
+  - `AddIteration` auto-creates `AgentSession` if no session exists for the story — callers don't need to pre-register stories
+  - `loadFromDisk` handles nonexistent base directory with `os.IsNotExist` — no error on first run
+  - `ListRuns` returns sorted by start time descending (most recent first) — useful for UI display
+  - 11 unit tests covering: save/get/list CRUD, add iteration with auto-session creation, disk persistence round-trip, error cases for not-found, empty dir, overwrite
 ---

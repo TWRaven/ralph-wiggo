@@ -148,7 +148,7 @@
         "go vet ./... passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Auto mode re-evaluates after each batch completes, since completed stories change the dependency picture."
     },
     {

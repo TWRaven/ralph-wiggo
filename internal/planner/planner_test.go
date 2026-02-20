@@ -1,8 +1,12 @@
 package planner
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/radvoogh/ralph-wiggo/internal/claude"
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
 )
 
@@ -21,9 +25,19 @@ func testPRD() *prd.PRD {
 	}
 }
 
+// mockJSONRunner implements JSONRunner for testing auto mode.
+type mockJSONRunner struct {
+	response json.RawMessage
+	err      error
+}
+
+func (m *mockJSONRunner) RunJSON(_ context.Context, _ claude.RunConfig, _ string) (json.RawMessage, error) {
+	return m.response, m.err
+}
+
 func TestNextStories_Sequential(t *testing.T) {
 	p := testPRD()
-	stories, err := NextStories(p, "sequential")
+	stories, err := NextStories(context.Background(), p, "sequential", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +54,7 @@ func TestNextStories_SequentialSkipsPassed(t *testing.T) {
 	// Mark US-002 as passed too.
 	p.UserStories[1].Passes = true
 
-	stories, err := NextStories(p, "sequential")
+	stories, err := NextStories(context.Background(), p, "sequential", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +72,7 @@ func TestNextStories_AllPassed(t *testing.T) {
 		p.UserStories[i].Passes = true
 	}
 
-	stories, err := NextStories(p, "sequential")
+	stories, err := NextStories(context.Background(), p, "sequential", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +83,7 @@ func TestNextStories_AllPassed(t *testing.T) {
 
 func TestNextStories_ParallelN(t *testing.T) {
 	p := testPRD()
-	stories, err := NextStories(p, "parallel-3")
+	stories, err := NextStories(context.Background(), p, "parallel-3", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,7 +102,7 @@ func TestNextStories_ParallelN(t *testing.T) {
 func TestNextStories_ParallelExceedingIncomplete(t *testing.T) {
 	p := testPRD()
 	// Only 4 incomplete stories exist.
-	stories, err := NextStories(p, "parallel-10")
+	stories, err := NextStories(context.Background(), p, "parallel-10", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +113,7 @@ func TestNextStories_ParallelExceedingIncomplete(t *testing.T) {
 
 func TestNextStories_Parallel1(t *testing.T) {
 	p := testPRD()
-	stories, err := NextStories(p, "parallel-1")
+	stories, err := NextStories(context.Background(), p, "parallel-1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +131,7 @@ func TestNextStories_ParallelAllPassed(t *testing.T) {
 		p.UserStories[i].Passes = true
 	}
 
-	stories, err := NextStories(p, "parallel-3")
+	stories, err := NextStories(context.Background(), p, "parallel-3", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +142,7 @@ func TestNextStories_ParallelAllPassed(t *testing.T) {
 
 func TestNextStories_InvalidMode(t *testing.T) {
 	p := testPRD()
-	_, err := NextStories(p, "unknown")
+	_, err := NextStories(context.Background(), p, "unknown", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown mode")
 	}
@@ -136,7 +150,7 @@ func TestNextStories_InvalidMode(t *testing.T) {
 
 func TestNextStories_InvalidParallelFormat(t *testing.T) {
 	p := testPRD()
-	_, err := NextStories(p, "parallel-abc")
+	_, err := NextStories(context.Background(), p, "parallel-abc", nil)
 	if err == nil {
 		t.Fatal("expected error for invalid parallel format")
 	}
@@ -144,7 +158,7 @@ func TestNextStories_InvalidParallelFormat(t *testing.T) {
 
 func TestNextStories_ParallelZero(t *testing.T) {
 	p := testPRD()
-	_, err := NextStories(p, "parallel-0")
+	_, err := NextStories(context.Background(), p, "parallel-0", nil)
 	if err == nil {
 		t.Fatal("expected error for parallel-0")
 	}
@@ -161,7 +175,7 @@ func TestNextStories_UnsortedPriorities(t *testing.T) {
 		},
 	}
 
-	stories, err := NextStories(p, "sequential")
+	stories, err := NextStories(context.Background(), p, "sequential", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -169,11 +183,200 @@ func TestNextStories_UnsortedPriorities(t *testing.T) {
 		t.Errorf("expected US-001 (lowest priority number), got %s", stories[0].ID)
 	}
 
-	stories, err = NextStories(p, "parallel-2")
+	stories, err = NextStories(context.Background(), p, "parallel-2", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if stories[0].ID != "US-001" || stories[1].ID != "US-002" {
 		t.Errorf("expected [US-001, US-002], got [%s, %s]", stories[0].ID, stories[1].ID)
 	}
+}
+
+// --- Auto mode tests ---
+
+func TestNextStories_AutoMode(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": [["US-002", "US-003"], ["US-004", "US-005"]]}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stories) != 2 {
+		t.Fatalf("expected 2 stories in first batch, got %d", len(stories))
+	}
+	if stories[0].ID != "US-002" || stories[1].ID != "US-003" {
+		t.Errorf("expected [US-002, US-003], got [%s, %s]", stories[0].ID, stories[1].ID)
+	}
+}
+
+func TestNextStories_AutoModeSingleBatch(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": [["US-002", "US-003", "US-004", "US-005"]]}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stories) != 4 {
+		t.Fatalf("expected 4 stories, got %d", len(stories))
+	}
+}
+
+func TestNextStories_AutoModeSkipsCompletedBatch(t *testing.T) {
+	p := testPRD()
+	// Mark US-002 and US-003 as passed — first batch is done.
+	p.UserStories[1].Passes = true
+	p.UserStories[2].Passes = true
+
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": [["US-002", "US-003"], ["US-004", "US-005"]]}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stories) != 2 {
+		t.Fatalf("expected 2 stories from second batch, got %d", len(stories))
+	}
+	if stories[0].ID != "US-004" || stories[1].ID != "US-005" {
+		t.Errorf("expected [US-004, US-005], got [%s, %s]", stories[0].ID, stories[1].ID)
+	}
+}
+
+func TestNextStories_AutoModeFallbackOnError(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		err: fmt.Errorf("Claude call failed"),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error (should fall back, not error): %v", err)
+	}
+	// Falls back to sequential — returns single highest-priority incomplete story.
+	if len(stories) != 1 {
+		t.Fatalf("expected 1 story (sequential fallback), got %d", len(stories))
+	}
+	if stories[0].ID != "US-002" {
+		t.Errorf("expected US-002 (sequential fallback), got %s", stories[0].ID)
+	}
+}
+
+func TestNextStories_AutoModeFallbackOnInvalidJSON(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`not valid json`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error (should fall back, not error): %v", err)
+	}
+	if len(stories) != 1 {
+		t.Fatalf("expected 1 story (sequential fallback), got %d", len(stories))
+	}
+	if stories[0].ID != "US-002" {
+		t.Errorf("expected US-002, got %s", stories[0].ID)
+	}
+}
+
+func TestNextStories_AutoModeFallbackOnEmptyBatches(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": []}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error (should fall back, not error): %v", err)
+	}
+	if len(stories) != 1 {
+		t.Fatalf("expected 1 story (sequential fallback), got %d", len(stories))
+	}
+}
+
+func TestNextStories_AutoModeNilExecutor(t *testing.T) {
+	p := testPRD()
+
+	stories, err := NextStories(context.Background(), p, "auto", nil)
+	if err != nil {
+		t.Fatalf("unexpected error (should fall back, not error): %v", err)
+	}
+	if len(stories) != 1 {
+		t.Fatalf("expected 1 story (sequential fallback), got %d", len(stories))
+	}
+	if stories[0].ID != "US-002" {
+		t.Errorf("expected US-002, got %s", stories[0].ID)
+	}
+}
+
+func TestNextStories_AutoModeAllPassed(t *testing.T) {
+	p := testPRD()
+	for i := range p.UserStories {
+		p.UserStories[i].Passes = true
+	}
+
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": [["US-001"]]}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stories) != 0 {
+		t.Errorf("expected empty slice when all stories pass, got %d", len(stories))
+	}
+}
+
+func TestNextStories_AutoModeIgnoresUnknownIDs(t *testing.T) {
+	p := testPRD()
+	mock := &mockJSONRunner{
+		response: json.RawMessage(`{"batches": [["US-UNKNOWN"], ["US-002", "US-003"]]}`),
+	}
+
+	stories, err := NextStories(context.Background(), p, "auto", mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// First batch has no valid IDs, so it's skipped; second batch is returned.
+	if len(stories) != 2 {
+		t.Fatalf("expected 2 stories from second batch, got %d", len(stories))
+	}
+	if stories[0].ID != "US-002" || stories[1].ID != "US-003" {
+		t.Errorf("expected [US-002, US-003], got [%s, %s]", stories[0].ID, stories[1].ID)
+	}
+}
+
+func TestBuildAutoPrompt(t *testing.T) {
+	stories := []*prd.UserStory{
+		{ID: "US-002", Title: "Second", Description: "Desc 2", Priority: 2},
+		{ID: "US-003", Title: "Third", Description: "Desc 3", Priority: 3},
+	}
+	prompt := buildAutoPrompt(stories)
+	if !contains(prompt, "US-002") || !contains(prompt, "US-003") {
+		t.Errorf("prompt should mention story IDs, got: %s", prompt)
+	}
+	if !contains(prompt, "parallelizable batches") {
+		t.Errorf("prompt should mention parallelizable batches, got: %s", prompt)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

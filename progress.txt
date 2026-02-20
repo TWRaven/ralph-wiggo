@@ -22,8 +22,10 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - Subcommand implementations: load embedded skill via `prompts.Get()`, build `claude.RunConfig`, call executor method
 - `signal.NotifyContext` for Ctrl+C handling in subcommands that spawn Claude
 - `slugify` helper in main.go for kebab-case filename generation from user input
-- `internal/planner` package: `NextStories(prd, mode)` returns `[]*prd.UserStory` — pointers into the PRD slice so stories can be mutated in place
-- Planner modes: "sequential" (single story), "parallel-N" (up to N stories), "auto" (future US-009)
+- `internal/planner` package: `NextStories(ctx, prd, mode, exec)` returns `[]*prd.UserStory` — pointers into the PRD slice so stories can be mutated in place
+- Planner modes: "sequential" (single story), "parallel-N" (up to N stories), "auto" (Claude dependency analysis)
+- `planner.JSONRunner` interface: accepted by `NextStories` for auto mode — satisfied by `*claude.Executor`, testable with mocks
+- Auto mode falls back to sequential on any failure (nil executor, Claude error, invalid JSON, empty batches)
 
 ---
 
@@ -108,4 +110,16 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `incompleteByPriority` helper filters and sorts — reusable for future modes (e.g. auto mode in US-009)
   - Parallel mode parses N from "parallel-N" string format using `strings.TrimPrefix` + `strconv.Atoi`
   - Returns error for unknown modes — future modes (like "auto") will be added in US-009
+---
+
+## 2026-02-20 - US-009
+- Implemented: Auto mode for story planner — sends incomplete stories to Claude via `JSONRunner` interface for dependency analysis, returns first incomplete batch, falls back to sequential on failure
+- Files changed: internal/planner/planner.go, internal/planner/planner_test.go
+- **Learnings for future iterations:**
+  - Define narrow interfaces (`JSONRunner` with just `RunJSON`) in the consumer package, not the provider — keeps dependencies clean
+  - `NextStories` signature changed to accept `context.Context` and `JSONRunner` — all callers need updating (ctx = `context.Background()` and exec = `nil` for non-auto modes)
+  - Auto mode uses a `batchResponse` struct with `Batches [][]string` — Claude returns story IDs grouped by dependency
+  - Fallback strategy: log the error + return sequential result (never propagate auto-mode errors to callers)
+  - `mockJSONRunner` pattern: struct with `response` and `err` fields satisfies the interface for deterministic tests
+  - Auto mode skips batches where all stories are already complete — finds the first batch with at least one incomplete story
 ---

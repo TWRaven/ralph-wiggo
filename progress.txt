@@ -137,5 +137,20 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `WorktreeAdd` uses `git worktree add -b <branch> <path>` — creates a new branch at the worktree path
   - `WorktreeRemove` uses `--force` flag to ensure cleanup even if worktree has uncommitted changes
   - `CommitAll` does `git add -A` (stages everything including untracked) then `git commit -m`
+- Agent loop (`RunCmd.Run`): loads PRD, checks out branch, loops calling `planner.NextStories` + `exec.RunStreaming`, reloads PRD each iteration
+- Agent invocation: `--dangerously-skip-permissions`, `--allowedTools Bash,Read,Edit,Write,Glob,Grep`, prompt.md as `--append-system-prompt`
+- `buildStoryPrompt` and `printStreamEvent` are helper functions in main.go for the agent loop
   - Error messages include the git subcommand name and stderr output for debuggability
+---
+
+## 2026-02-20 - US-011
+- Implemented: Agent loop core sequential execution — `ralph-wiggo run` reads prd.json, creates/checks out feature branch, loops through stories via planner.NextStories (sequential mode), spawns Claude agents via RunStreaming with embedded prompt.md, prints streaming events, exits when all pass or max iterations reached
+- Files changed: cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - `RunCmd.Run` reloads prd.json after each iteration to pick up changes the agent made (story passes, etc.)
+  - Agent gets `--dangerously-skip-permissions` and `--allowedTools Bash,Read,Edit,Write,Glob,Grep`
+  - `buildStoryPrompt` formats story details (ID, title, description, acceptance criteria, notes) as markdown for the agent
+  - `printStreamEvent` handles all event types: assistant text printed inline, tool_use/tool_result as bracketed indicators, errors to stderr
+  - The loop checks `planner.NextStories` at the top of each iteration — when all stories pass, it returns empty slice and the loop breaks
+  - `--max-iterations` flag (default 10) is a global safety net; future US-012 will add per-story iteration tracking
 ---

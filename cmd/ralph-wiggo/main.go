@@ -10,6 +10,8 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/radvoogh/ralph-wiggo/internal/claude"
+	"github.com/radvoogh/ralph-wiggo/internal/git"
+	"github.com/radvoogh/ralph-wiggo/internal/planner"
 	"github.com/radvoogh/ralph-wiggo/internal/prd"
 	"github.com/radvoogh/ralph-wiggo/internal/prompts"
 )
@@ -44,14 +46,151 @@ func (c *CLI) AfterApply() error {
 
 // RunCmd implements the 'run' subcommand.
 type RunCmd struct {
-	PRDPath     string `help:"Path to prd.json." default:"prd.json" name:"prd"`
-	Parallelism string `help:"Parallelism mode: sequential, parallel-N, or auto." default:"sequential"`
-	UI          bool   `help:"Start web dashboard alongside the agent loop."`
+	PRDPath       string `help:"Path to prd.json." default:"prd.json" name:"prd"`
+	Parallelism   string `help:"Parallelism mode: sequential, parallel-N, or auto." default:"sequential"`
+	MaxIterations int    `help:"Maximum iterations per story before skipping." default:"10" name:"max-iterations"`
+	UI            bool   `help:"Start web dashboard alongside the agent loop."`
 }
 
 func (r *RunCmd) Run(globals *CLI) error {
-	fmt.Println("run: not yet implemented")
+	// Load the PRD.
+	p, err := prd.LoadPRD(r.PRDPath)
+	if err != nil {
+		return fmt.Errorf("loading PRD: %w", err)
+	}
+	fmt.Printf("Loaded PRD: %s (%d stories)\n", p.Project, len(p.UserStories))
+
+	// Create or check out the feature branch.
+	if err := git.CreateOrCheckoutBranch(p.BranchName); err != nil {
+		return fmt.Errorf("switching to branch %q: %w", p.BranchName, err)
+	}
+	fmt.Printf("On branch: %s\n", p.BranchName)
+
+	// Load the embedded agent prompt for --append-system-prompt.
+	agentPrompt, err := prompts.Get("prompt.md")
+	if err != nil {
+		return fmt.Errorf("loading prompt.md: %w", err)
+	}
+
+	exec := claude.NewExecutor()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	iteration := 0
+	for {
+		// Get next stories to work on.
+		stories, err := planner.NextStories(ctx, p, r.Parallelism, exec)
+		if err != nil {
+			return fmt.Errorf("planner: %w", err)
+		}
+		if len(stories) == 0 {
+			fmt.Println("\nAll stories pass!")
+			break
+		}
+
+		iteration++
+		if iteration > r.MaxIterations {
+			fmt.Printf("\nReached max iterations (%d). Stopping.\n", r.MaxIterations)
+			break
+		}
+
+		// In sequential mode, there is exactly one story.
+		story := stories[0]
+		fmt.Printf("\n--- Iteration %d: %s - %s ---\n", iteration, story.ID, story.Title)
+
+		// Build the story prompt.
+		storyPrompt := buildStoryPrompt(story)
+
+		cfg := claude.RunConfig{
+			Prompt:             storyPrompt,
+			Model:              globals.Model,
+			MaxTurns:           globals.MaxTurns,
+			MaxBudgetUSD:       globals.MaxBudget,
+			WorkDir:            globals.WorkDir,
+			AppendSystemPrompt: agentPrompt,
+			AllowedTools:       []string{"Bash", "Read", "Edit", "Write", "Glob", "Grep"},
+			AdditionalFlags:    []string{"--dangerously-skip-permissions"},
+		}
+
+		events, err := exec.RunStreaming(ctx, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error starting agent for %s: %v\n", story.ID, err)
+			continue
+		}
+
+		// Print streaming events as they arrive.
+		exitedCleanly := true
+		for evt := range events {
+			printStreamEvent(evt)
+			if evt.Type == claude.EventError {
+				exitedCleanly = false
+			}
+		}
+
+		if exitedCleanly {
+			fmt.Printf("\n[%s] Agent completed.\n", story.ID)
+		} else {
+			fmt.Printf("\n[%s] Agent encountered errors.\n", story.ID)
+		}
+
+		// Reload PRD to pick up any changes the agent made.
+		p, err = prd.LoadPRD(r.PRDPath)
+		if err != nil {
+			return fmt.Errorf("reloading PRD after iteration: %w", err)
+		}
+	}
+
+	// Print final summary.
+	passed, total := 0, len(p.UserStories)
+	for _, s := range p.UserStories {
+		if s.Passes {
+			passed++
+		}
+	}
+	fmt.Printf("\nSummary: %d/%d stories passed\n", passed, total)
+
 	return nil
+}
+
+// buildStoryPrompt constructs the prompt sent to the Claude agent for a story.
+func buildStoryPrompt(s *prd.UserStory) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Implement the following user story:\n\n"))
+	sb.WriteString(fmt.Sprintf("**ID:** %s\n", s.ID))
+	sb.WriteString(fmt.Sprintf("**Title:** %s\n", s.Title))
+	sb.WriteString(fmt.Sprintf("**Description:** %s\n\n", s.Description))
+	sb.WriteString("**Acceptance Criteria:**\n")
+	for _, ac := range s.AcceptanceCriteria {
+		sb.WriteString(fmt.Sprintf("- %s\n", ac))
+	}
+	if s.Notes != "" {
+		sb.WriteString(fmt.Sprintf("\n**Notes:** %s\n", s.Notes))
+	}
+	return sb.String()
+}
+
+// printStreamEvent prints a streaming event from the Claude agent to stdout.
+func printStreamEvent(evt claude.StreamEvent) {
+	switch evt.Type {
+	case claude.EventAssistant:
+		if evt.Message != "" {
+			fmt.Print(evt.Message)
+		}
+	case claude.EventToolUse:
+		fmt.Printf("\n[tool: %s]\n", evt.ToolName)
+	case claude.EventToolResult:
+		// Tool results can be large; print a brief indicator.
+		fmt.Println("[tool result]")
+	case claude.EventError:
+		fmt.Fprintf(os.Stderr, "[error] %s\n", evt.Message)
+	case claude.EventInit:
+		if evt.SessionID != "" {
+			fmt.Printf("[session: %s]\n", evt.SessionID)
+		}
+	case claude.EventResult:
+		fmt.Println("\n[agent finished]")
+	}
 }
 
 // PRDCmd implements the 'prd' subcommand.

@@ -4,9 +4,11 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 )
@@ -61,14 +63,10 @@ func NewExecutor() *Executor {
 	return &Executor{ClaudePath: "claude"}
 }
 
-// buildArgs constructs the CLI arguments for a streaming invocation.
-func (e *Executor) buildStreamingArgs(cfg RunConfig) []string {
-	args := []string{
-		"-p", cfg.Prompt,
-		"--output-format", "stream-json",
-		"--verbose",
-	}
-
+// buildCommonArgs constructs the shared CLI arguments (model, turns, budget, etc.)
+// that are common across all invocation modes.
+func (e *Executor) buildCommonArgs(cfg RunConfig) []string {
+	var args []string
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
@@ -93,6 +91,17 @@ func (e *Executor) buildStreamingArgs(cfg RunConfig) []string {
 		}
 	}
 	args = append(args, cfg.AdditionalFlags...)
+	return args
+}
+
+// buildStreamingArgs constructs the CLI arguments for a streaming invocation.
+func (e *Executor) buildStreamingArgs(cfg RunConfig) []string {
+	args := []string{
+		"-p", cfg.Prompt,
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	args = append(args, e.buildCommonArgs(cfg)...)
 	return args
 }
 
@@ -171,4 +180,96 @@ func (e *Executor) RunStreaming(ctx context.Context, cfg RunConfig) (<-chan Stre
 	}()
 
 	return ch, nil
+}
+
+// RunInteractive runs the Claude CLI with stdin/stdout/stderr connected to the
+// user's terminal. This mode does NOT use the -p flag — Claude runs in its
+// interactive mode where it can converse with the user. If cfg.Prompt is set it
+// is passed via -p so the session starts with an initial message.
+func (e *Executor) RunInteractive(ctx context.Context, cfg RunConfig) error {
+	bin := e.ClaudePath
+	if bin == "" {
+		bin = "claude"
+	}
+
+	var args []string
+	if cfg.Prompt != "" {
+		args = append(args, "-p", cfg.Prompt)
+	}
+	args = append(args, e.buildCommonArgs(cfg)...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if cfg.WorkDir != "" {
+		cmd.Dir = cfg.WorkDir
+	}
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude: interactive: %w", err)
+	}
+	return nil
+}
+
+// jsonOutput is the envelope returned by claude --output-format json.
+type jsonOutput struct {
+	Result json.RawMessage `json:"result"`
+}
+
+// RunJSON runs the Claude CLI with -p, --output-format json, and --json-schema.
+// It returns the parsed result field from the JSON output. An error is returned
+// if Claude exits non-zero or the output is not valid JSON.
+func (e *Executor) RunJSON(ctx context.Context, cfg RunConfig, jsonSchema string) (json.RawMessage, error) {
+	bin := e.ClaudePath
+	if bin == "" {
+		bin = "claude"
+	}
+
+	args := []string{
+		"-p", cfg.Prompt,
+		"--output-format", "json",
+	}
+	if jsonSchema != "" {
+		args = append(args, "--json-schema", jsonSchema)
+	}
+	args = append(args, e.buildCommonArgs(cfg)...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if cfg.WorkDir != "" {
+		cmd.Dir = cfg.WorkDir
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("claude: json mode: %w (stderr: %s)", err, stderr.String())
+	}
+
+	output := stdout.Bytes()
+	if len(output) == 0 {
+		return nil, fmt.Errorf("claude: json mode: empty output")
+	}
+
+	// The claude CLI with --output-format json returns a JSON object with a
+	// "result" field containing the actual response.
+	var envelope jsonOutput
+	if err := json.Unmarshal(output, &envelope); err != nil {
+		// If the output doesn't match the envelope format, try returning it
+		// directly as raw JSON.
+		if !json.Valid(output) {
+			return nil, fmt.Errorf("claude: json mode: output is not valid JSON: %s", string(output))
+		}
+		return json.RawMessage(output), nil
+	}
+
+	if envelope.Result == nil {
+		// No "result" field — return the entire output as raw JSON.
+		return json.RawMessage(output), nil
+	}
+
+	return envelope.Result, nil
 }

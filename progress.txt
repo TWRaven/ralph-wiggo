@@ -13,6 +13,9 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - Kong `AfterApply()` method on CLI struct runs after flag parsing, before subcommand — used for setup logic
 - `internal/claude` package: `Executor` wraps the claude CLI, `RunConfig` holds invocation params, `StreamEvent` models NDJSON output
 - `RunStreaming` uses `exec.CommandContext` for cancellation, `bufio.Scanner` for NDJSON parsing, returns `<-chan StreamEvent`
+- `RunInteractive` connects stdin/stdout/stderr to the terminal — no -p flag unless cfg.Prompt is set
+- `RunJSON` uses `--output-format json` and `--json-schema`, captures stdout into buffer, parses result envelope
+- Common args (model, turns, budget, etc.) extracted into `buildCommonArgs` — reused by all three modes
 
 ---
 
@@ -45,4 +48,15 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `bufio.Scanner` needs a large buffer (10MB) for tool output lines that can be very large
   - Always drain stderr in a separate goroutine to prevent blocking the subprocess
   - `json.RawMessage` is useful for preserving raw event data while also parsing known fields
+---
+
+## 2026-02-20 - US-004
+- Implemented: RunInteractive and RunJSON methods on Executor, refactored common arg building into buildCommonArgs
+- Files changed: internal/claude/claude.go
+- **Learnings for future iterations:**
+  - Refactored `buildStreamingArgs` into `buildCommonArgs` + mode-specific prefix — keeps all three modes (streaming, interactive, JSON) DRY
+  - `RunInteractive` connects os.Stdin/Stdout/Stderr directly — no pipe management needed
+  - `RunJSON` captures stdout into `bytes.Buffer`, then parses the `result` envelope from `--output-format json`
+  - Claude `--output-format json` wraps the response in a `{"result": ...}` envelope — parse and unwrap it
+  - If the output doesn't have a `result` field, fall back to returning the raw JSON
 ---

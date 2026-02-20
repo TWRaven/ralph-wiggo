@@ -16,6 +16,9 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - `RunInteractive` connects stdin/stdout/stderr to the terminal — no -p flag unless cfg.Prompt is set
 - `RunJSON` uses `--output-format json` and `--json-schema`, captures stdout into buffer, parses result envelope
 - Common args (model, turns, budget, etc.) extracted into `buildCommonArgs` — reused by all three modes
+- `internal/prd` package: `PRD` and `UserStory` types with JSON tags, `LoadPRD`/`SavePRD` for file I/O, `Validate` for consistency checks
+- `prd.JSONSchema` constant provides the JSON schema string for use with `claude --json-schema`
+- `SavePRD` appends trailing newline for clean file output
 
 ---
 
@@ -59,4 +62,14 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - `RunJSON` captures stdout into `bytes.Buffer`, then parses the `result` envelope from `--output-format json`
   - Claude `--output-format json` wraps the response in a `{"result": ...}` envelope — parse and unwrap it
   - If the output doesn't have a `result` field, fall back to returning the raw JSON
+---
+
+## 2026-02-20 - US-005
+- Implemented: PRD types (PRD, UserStory) with JSON parsing, LoadPRD/SavePRD file I/O, Validate function (unique IDs, sequential priorities), JSONSchema constant, and unit tests
+- Files changed: internal/prd/prd.go, internal/prd/prd_test.go
+- **Learnings for future iterations:**
+  - `Validate` sorts a copy of stories by priority to check sequential ordering — this allows stories to be listed in any order in the JSON
+  - `SavePRD` appends a trailing newline for cleaner file output and git diffs
+  - `json.MarshalIndent` with 2-space indent matches the existing prd.json formatting convention
+  - Test helper `testPRD()` returns a standard PRD fixture — reuse for consistency
 ---

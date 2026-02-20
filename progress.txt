@@ -258,6 +258,7 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - State store now wired end-to-end: agent loop → PublishEvent → SSE subscribers, and agent loop → AddIteration → historical view
   - `NewServer` signature changed to accept `*state.MemoryStore` (may be nil) — all handlers check for nil store gracefully
   - History routes use path-based routing: `/history`, `/history/<run-id>`, `/history/<run-id>/story/<story-id>`, `/history/<run-id>/progress`
+- Dashboard story rows use enriched `storyRow` type (not raw `prd.UserStory`) — merge PRD + state store data in `loadDashboardData`
   - `handleHistoryRoutes` parses nested paths with `strings.SplitN(path, "/", 3)` — dispatches to sub-handlers by part count
   - `template.FuncMap` with `renderEvent` registered before `ParseFS` — wraps `renderEventHTML` to return `template.HTML` for safe rendering
   - `template.New("").Funcs(funcMap).ParseFS(...)` — Funcs must be registered before ParseFS, not after
@@ -272,4 +273,28 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Nested route matching with `http.ServeMux`: register both `/history` (exact) and `/history/` (prefix) to handle both the list and sub-paths
   - `strings.SplitN(path, "/", 3)` with part count check handles variable-depth URL patterns cleanly
   - Progress.txt path derived from `filepath.Dir(s.prdPath)` keeps it alongside prd.json regardless of server working directory
+---
+
+## 2026-02-20 - US-019
+- Implemented: Progress visualization on dashboard — enriched story rows with state store data (iteration count, elapsed time, color-coded status for pending/running/passed/failed), enhanced progress bar with "X/Y — Z%" text, responsive CSS with media queries for large screens and mobile, pulse animation for running stories
+- Files changed: internal/web/server.go (new `storyRow` type, enriched `loadDashboardData` with state store queries, `formatElapsed` helper), internal/web/templates/stories.html (iteration count badge, elapsed column, color-coded status badges with CSS classes, row highlighting), internal/web/static/style.css (responsive layout with `@media` queries, larger fonts/padding for secondary monitors, running animation, high contrast colors, gradient progress bar)
+- **Learnings for future iterations:**
+  - `storyRow` enriched type decouples dashboard display from `prd.UserStory` — allows merging PRD + state store data cleanly
+  - `store.GetLatestSession(storyID)` returns the most recent AgentSession across all runs — useful for dashboard enrichment
+  - CSS `@media (min-width:1400px)` targets large/secondary monitors — increase font sizes, padding, and max-width for readability
+  - CSS `@keyframes pulse` animation on the running badge gives visual feedback that work is in progress
+  - htmx polling on the `#story-list` div already auto-updates everything inside the `{{template "stories" .}}` block — no changes needed for auto-refresh
+  - Progress bar gradient (`linear-gradient(90deg, #00c853, #00e676)`) gives depth to the fill compared to a flat color
+---
+
+## 2026-02-20 - US-020
+- Implemented: End-to-end workflow command (`ralph-wiggo full <description>`) that chains PRD generation → conversion → agent loop with y/n confirmation prompts between each step
+- Files changed: cmd/ralph-wiggo/main.go (updated FullCmd struct with flags from all subcommands, implemented Run method with 3-step flow, added confirmPrompt helper)
+- **Learnings for future iterations:**
+  - `FullCmd` reuses logic from PRDCmd, ConvertCmd, and RunCmd inline rather than calling their Run methods — avoids issues with flag defaults and context propagation
+  - Exception: Step 3 delegates to `runCmd.Run(globals)` since the run loop is complex and already well-factored
+  - `confirmPrompt` uses `fmt.Scanln` for simple y/n input — returns bool, trims whitespace and lowercases
+  - Flag naming avoids conflicts: `--output` for PRD markdown path (matches PRDCmd), `--json-output` for prd.json path (matches ConvertCmd default)
+  - Kong struct tags: `name:"json-output"` maps to `--json-output` CLI flag
+  - macOS dyld `missing LC_UUID` errors when running `go run` or built binaries — environment issue, not code; `go build/vet/test` still work correctly
 ---

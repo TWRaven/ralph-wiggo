@@ -330,7 +330,7 @@
         "go vet ./... passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "Named 'full' instead of 'go' to avoid confusion with Go tooling."
     },
     {

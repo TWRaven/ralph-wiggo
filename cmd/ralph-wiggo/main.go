@@ -756,14 +756,136 @@ func (s *ServeCmd) Run(globals *CLI) error {
 
 // FullCmd implements the 'full' subcommand.
 type FullCmd struct {
+	// PRD generation flags.
 	Description string `arg:"" help:"Feature description for the full workflow."`
-	Output      string `help:"Output path for generated PRD." default:""`
-	UI          bool   `help:"Start web dashboard during the run phase."`
+	Output      string `help:"Output path for generated PRD markdown." default:""`
+
+	// Convert flags.
+	JSONOutput string `help:"Output path for prd.json." default:"prd.json" name:"json-output"`
+
+	// Run flags.
+	Parallelism   string `help:"Parallelism mode: sequential, parallel-N, or auto." default:"sequential"`
+	MaxIterations int    `help:"Maximum iterations per story before skipping." default:"10" name:"max-iterations"`
+	UI            bool   `help:"Start web dashboard during the run phase."`
 }
 
 func (f *FullCmd) Run(globals *CLI) error {
-	fmt.Println("full: not yet implemented")
-	return nil
+	// Step 1: PRD generation (interactive).
+	prdOutputPath := f.Output
+	if prdOutputPath == "" {
+		prdOutputPath = "tasks/prd-" + slugify(f.Description) + ".md"
+	}
+
+	fmt.Println("=== Step 1: PRD Generation ===")
+	fmt.Printf("Generating PRD for: %s\n", f.Description)
+	fmt.Printf("Output: %s\n\n", prdOutputPath)
+
+	skillContent, err := prompts.Get("prd-skill.md")
+	if err != nil {
+		return fmt.Errorf("loading prd-skill.md: %w", err)
+	}
+
+	exec := claude.NewExecutor()
+
+	prompt := fmt.Sprintf(
+		"Generate a PRD for the following feature:\n\n%s\n\nSave the PRD to: %s",
+		f.Description, prdOutputPath,
+	)
+
+	cfg := claude.RunConfig{
+		Prompt:             prompt,
+		Model:              globals.Model,
+		MaxTurns:           globals.MaxTurns,
+		MaxBudgetUSD:       globals.MaxBudget,
+		WorkDir:            globals.WorkDir,
+		AppendSystemPrompt: skillContent,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	if err := exec.RunInteractive(ctx, cfg); err != nil {
+		return fmt.Errorf("prd generation: %w", err)
+	}
+
+	// Confirm before proceeding to conversion.
+	fmt.Printf("\nPRD generated at: %s\n", prdOutputPath)
+	if !confirmPrompt("Proceed with conversion to prd.json?") {
+		fmt.Println("Aborted.")
+		return nil
+	}
+
+	// Step 2: Convert PRD to prd.json.
+	fmt.Println("\n=== Step 2: PRD Conversion ===")
+
+	ralphSkill, err := prompts.Get("ralph-skill.md")
+	if err != nil {
+		return fmt.Errorf("loading ralph-skill.md: %w", err)
+	}
+
+	prdContent, err := os.ReadFile(prdOutputPath)
+	if err != nil {
+		return fmt.Errorf("reading PRD file %q: %w", prdOutputPath, err)
+	}
+
+	convertPrompt := fmt.Sprintf(
+		"Convert the following PRD markdown into the prd.json format.\n\n%s",
+		string(prdContent),
+	)
+
+	convertCfg := claude.RunConfig{
+		Prompt:             convertPrompt,
+		Model:              globals.Model,
+		MaxTurns:           globals.MaxTurns,
+		MaxBudgetUSD:       globals.MaxBudget,
+		WorkDir:            globals.WorkDir,
+		AppendSystemPrompt: ralphSkill,
+	}
+
+	result, err := exec.RunJSON(ctx, convertCfg, prd.JSONSchema)
+	if err != nil {
+		return fmt.Errorf("prd conversion: %w", err)
+	}
+
+	var parsedPRD prd.PRD
+	if err := json.Unmarshal(result, &parsedPRD); err != nil {
+		return fmt.Errorf("parsing conversion result: %w", err)
+	}
+
+	if err := prd.Validate(&parsedPRD); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: validation issue: %v\n", err)
+	}
+
+	if err := prd.SavePRD(f.JSONOutput, &parsedPRD); err != nil {
+		return fmt.Errorf("saving prd.json: %w", err)
+	}
+
+	fmt.Printf("Wrote %s (%d stories, branch: %s)\n", f.JSONOutput, len(parsedPRD.UserStories), parsedPRD.BranchName)
+
+	// Confirm before proceeding to run.
+	if !confirmPrompt("Proceed with agent loop?") {
+		fmt.Println("Aborted.")
+		return nil
+	}
+
+	// Step 3: Run the agent loop.
+	fmt.Println("\n=== Step 3: Agent Loop ===")
+	runCmd := RunCmd{
+		PRDPath:       f.JSONOutput,
+		Parallelism:   f.Parallelism,
+		MaxIterations: f.MaxIterations,
+		UI:            f.UI,
+	}
+	return runCmd.Run(globals)
+}
+
+// confirmPrompt prints a y/n prompt and returns true if the user confirms.
+func confirmPrompt(message string) bool {
+	fmt.Printf("%s (y/n): ", message)
+	var response string
+	fmt.Scanln(&response)
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes"
 }
 
 // slugify converts a string to a kebab-case slug suitable for filenames.

@@ -33,7 +33,7 @@
         "go vet ./... passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Adapt content from https://github.com/snarktank/ralph — CLAUDE.md becomes prompt.md, skills/prd/SKILL.md becomes prd-skill.md, skills/ralph/SKILL.md becomes ralph-skill.md. Adjust for Go project context (go vet instead of typecheck, etc)."
     },
     {

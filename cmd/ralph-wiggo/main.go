@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/alecthomas/kong"
+	"github.com/radvoogh/ralph-wiggo/internal/prompts"
 )
 
 // CLI defines the top-level command structure for ralph-wiggo.
@@ -13,13 +15,26 @@ type CLI struct {
 	Model    string  `help:"Claude model to use." default:"claude-sonnet-4-6"`
 	MaxBudget float64 `help:"Maximum budget in USD per agent session." name:"max-budget"`
 	MaxTurns int     `help:"Maximum agentic turns per story." default:"50" name:"max-turns"`
-	WorkDir  string  `help:"Working directory." default:"." name:"work-dir" type:"existingdir"`
+	WorkDir         string   `help:"Working directory." default:"." name:"work-dir" type:"existingdir"`
+	PromptOverrides []string `help:"Override an embedded prompt file: name=path (e.g. prompt.md=/tmp/my-prompt.md)." name:"prompt-override"`
 
 	Run     RunCmd     `cmd:"" help:"Run the agent loop on prd.json stories."`
 	PRD     PRDCmd     `cmd:"" help:"Generate a PRD interactively with Claude."`
 	Convert ConvertCmd `cmd:"" help:"Convert a PRD markdown file to prd.json."`
 	Serve   ServeCmd   `cmd:"" help:"Start the web dashboard server."`
 	Full    FullCmd    `cmd:"" help:"Full workflow: PRD generation, conversion, and agent loop."`
+}
+
+// AfterApply registers any prompt overrides before subcommands run.
+func (c *CLI) AfterApply() error {
+	for _, override := range c.PromptOverrides {
+		parts := strings.SplitN(override, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid --prompt-override format %q: expected name=path", override)
+		}
+		prompts.SetOverride(parts[0], parts[1])
+	}
+	return nil
 }
 
 // RunCmd implements the 'run' subcommand.

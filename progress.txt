@@ -7,6 +7,10 @@ Started: Fri Feb 20 20:14:14 CET 2026
 - Kong CLI framework: subcommands defined as struct fields on CLI type, with Run(globals *CLI) method
 - Use `gb <branch-name>` for branch creation (git-machete), `gsn` for rebase+MR
 - Fresh repos need an initial commit before `gb` works
+- Embedded files live in `embedded/` package with `go:embed` directive in `embedded/embed.go`
+- `internal/prompts` wraps the embedded FS — use `prompts.Get("filename.md")` to read content
+- Override embedded files at runtime via `prompts.SetOverride(name, path)` or CLI `--prompt-override name=path`
+- Kong `AfterApply()` method on CLI struct runs after flag parsing, before subcommand — used for setup logic
 
 ---
 
@@ -18,4 +22,14 @@ Started: Fri Feb 20 20:14:14 CET 2026
   - Each subcommand needs a `Run(globals *CLI) error` method
   - `gb` requires at least one commit to exist in the repo
   - Global flags are on the parent CLI struct, automatically available to all subcommands
+---
+
+## 2026-02-20 - US-002
+- Implemented: Embedded prompt and skill files with go:embed, internal/prompts package with Get and override support, --prompt-override CLI flag
+- Files changed: embedded/embed.go, embedded/prompt.md, embedded/prd-skill.md, embedded/ralph-skill.md, internal/prompts/prompts.go, internal/prompts/prompts_test.go, cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - `go:embed` can only embed files relative to the package directory — embedded files must live in or under the Go package that declares the embed directive
+  - Solution: put embed.FS export in `embedded/` package, then import from `internal/prompts`
+  - Kong `AfterApply()` on CLI struct is the right hook for pre-command setup (override registration)
+  - Kong supports `[]string` flags that can be repeated: `--prompt-override a=b --prompt-override c=d`
 ---

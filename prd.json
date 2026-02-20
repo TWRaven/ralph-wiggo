@@ -1,0 +1,354 @@
+{
+  "project": "ralph-wiggo",
+  "branchName": "ralph/ralph-wiggo",
+  "description": "Go port of the Ralph autonomous AI agent loop with web dashboard, parallel execution, and streaming output",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Project scaffolding and CLI framework with kong",
+      "description": "As a developer, I want the Go project initialized with module, directory structure, and kong CLI parsing so that all subsequent work has a foundation.",
+      "acceptanceCriteria": [
+        "go.mod initialized with module path github.com/radvoogh/ralph-wiggo",
+        "kong CLI framework parses subcommands: run, prd, convert, serve, full",
+        "Global flags parsed: --verbose, --model, --max-budget, --max-turns, --work-dir",
+        "ralph-wiggo --help prints usage for all subcommands",
+        "go build ./... succeeds",
+        "go vet ./... passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Embed prompt and skill files with go:embed",
+      "description": "As a developer, I need prompt templates and skill definitions embedded in the binary so the tool works without external files.",
+      "acceptanceCriteria": [
+        "Directory embedded/ contains: prompt.md (agent instructions adapted from original ralph CLAUDE.md), prd-skill.md (PRD generation skill adapted from original ralph skills/prd/SKILL.md), ralph-skill.md (JSON conversion skill adapted from original ralph skills/ralph/SKILL.md)",
+        "go:embed directive exposes files as embed.FS in an internal/prompts package",
+        "prompts.Get(name string) (string, error) reads from embedded FS and returns content",
+        "CLI flag --prompt-override name=path overrides any embedded file with a local file",
+        "prompts.Get respects overrides when set",
+        "go build ./... succeeds",
+        "go vet ./... passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Adapt content from https://github.com/snarktank/ralph — CLAUDE.md becomes prompt.md, skills/prd/SKILL.md becomes prd-skill.md, skills/ralph/SKILL.md becomes ralph-skill.md. Adjust for Go project context (go vet instead of typecheck, etc)."
+    },
+    {
+      "id": "US-003",
+      "title": "Claude CLI executor - core struct and streaming mode",
+      "description": "As a developer, I need a Go package that shells out to the claude CLI and parses streaming JSON output so all agent invocations go through a single interface.",
+      "acceptanceCriteria": [
+        "Package internal/claude with type Executor struct",
+        "RunConfig struct with fields: Prompt, AllowedTools, MaxTurns, MaxBudgetUSD, Model, WorkDir, SystemPrompt, AppendSystemPrompt, ResumeSessionID, AdditionalFlags",
+        "StreamEvent type that models the NDJSON events from claude --output-format stream-json (at minimum: assistant text, tool_use, tool_result, error, init with session_id)",
+        "Method RunStreaming(ctx context.Context, cfg RunConfig) (<-chan StreamEvent, error) that spawns claude -p with --output-format stream-json --verbose and parses NDJSON line-by-line into StreamEvent channel",
+        "Context cancellation kills the subprocess via CommandContext",
+        "Channel is closed when subprocess exits",
+        "go vet ./... passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "The claude CLI with --output-format stream-json emits newline-delimited JSON. Each line is a JSON object with a type field."
+    },
+    {
+      "id": "US-004",
+      "title": "Claude CLI executor - interactive and JSON modes",
+      "description": "As a developer, I need interactive (terminal-proxied) and structured JSON output modes on the executor for PRD generation and conversion steps.",
+      "acceptanceCriteria": [
+        "Method RunInteractive(ctx context.Context, cfg RunConfig) error that runs claude with stdin/stdout/stderr connected to os.Stdin/os.Stdout/os.Stderr",
+        "Method RunJSON(ctx context.Context, cfg RunConfig, jsonSchema string) (json.RawMessage, error) that runs claude -p with --output-format json and --json-schema, parses the result field from output",
+        "RunInteractive does NOT use -p flag (it runs in interactive mode)",
+        "RunJSON returns error if Claude exits non-zero or output is not valid JSON",
+        "go vet ./... passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "PRD types and JSON parsing",
+      "description": "As a developer, I need Go types for the prd.json structure with read/write/validate so the agent loop and commands can work with PRD data.",
+      "acceptanceCriteria": [
+        "Package internal/prd with types: PRD (project, branchName, description, userStories), UserStory (id, title, description, acceptanceCriteria []string, priority int, passes bool, notes string)",
+        "Function LoadPRD(path string) (*PRD, error) reads and parses prd.json",
+        "Function SavePRD(path string, prd *PRD) error writes prd.json with indented formatting",
+        "Function Validate(prd *PRD) error checks: unique IDs, sequential priorities, all passes default false on new PRDs",
+        "JSON schema string constant matching the PRD structure (for use with claude --json-schema)",
+        "Unit tests for Load, Save, and Validate",
+        "go vet ./... passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "PRD generation command (ralph-wiggo prd)",
+      "description": "As a user, I want to run ralph-wiggo prd 'build a task manager' and have it interactively generate a PRD markdown file.",
+      "acceptanceCriteria": [
+        "ralph-wiggo prd <description> launches Claude CLI in interactive mode via executor.RunInteractive",
+        "Embedded prd-skill.md content is passed as --append-system-prompt",
+        "User's description string is passed as the initial -p prompt",
+        "Claude's stdin/stdout are connected to the user's terminal so the user can answer clarifying questions",
+        "Flag --output <path> sets output location (default: tasks/prd-<feature>.md)",
+        "go vet ./... passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "The interactive mode lets Claude ask clarifying questions to the user. The PRD skill instructs Claude to save the file."
+    },
+    {
+      "id": "US-007",
+      "title": "PRD-to-JSON conversion command (ralph-wiggo convert)",
+      "description": "As a user, I want to convert a PRD markdown file into prd.json so the agent loop can consume it.",
+      "acceptanceCriteria": [
+        "ralph-wiggo convert <prd-file.md> reads the markdown file and sends content to Claude via executor.RunJSON",
+        "Embedded ralph-skill.md is passed as --append-system-prompt",
+        "Uses the JSON schema constant from internal/prd package",
+        "Output written to prd.json in working directory (or --output <path>)",
+        "Runs prd.Validate() on the result and prints warnings for any issues",
+        "go vet ./... passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Story planner - sequential and parallel-N modes",
+      "description": "As a developer, I need logic to select the next stories to work on based on the parallelism mode.",
+      "acceptanceCriteria": [
+        "Package internal/planner with function NextStories(prd *prd.PRD, mode string) []*prd.UserStory",
+        "When mode is 'sequential': returns slice with single highest-priority story where passes == false",
+        "When mode is 'parallel-N' (e.g. 'parallel-3'): returns up to N highest-priority incomplete stories",
+        "Stories with passes == true are never returned",
+        "Returns empty slice when all stories pass",
+        "Unit tests for sequential mode and parallel-N mode with various PRD states",
+        "go vet ./... passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Story planner - auto mode with Claude dependency analysis",
+      "description": "As a developer, I need an auto mode where Claude analyzes story dependencies to determine which can run in parallel.",
+      "acceptanceCriteria": [
+        "When mode is 'auto': sends incomplete stories to Claude via executor.RunJSON asking it to group them into parallelizable batches",
+        "Claude returns array of arrays of story IDs, where each inner array is a batch that can run concurrently",
+        "NextStories returns the first incomplete batch",
+        "Falls back to sequential mode if Claude call fails",
+        "Function accepts an executor interface (not concrete type) so it can be tested with a mock",
+        "Unit test with mock executor verifying batch parsing",
+        "go vet ./... passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Auto mode re-evaluates after each batch completes, since completed stories change the dependency picture."
+    },
+    {
+      "id": "US-010",
+      "title": "Git operations package",
+      "description": "As a developer, I need a package for git branch creation, worktree management, and commit helpers used by the agent loop.",
+      "acceptanceCriteria": [
+        "Package internal/git with functions: CreateOrCheckoutBranch(name string) error, WorktreeAdd(path string, branch string) error, WorktreeRemove(path string) error, CommitAll(message string) error, CurrentBranch() (string, error)",
+        "All functions shell out to git CLI via os/exec",
+        "CreateOrCheckoutBranch checks out existing branch or creates new one from current HEAD",
+        "WorktreeAdd creates a new git worktree at the given path on a temporary branch",
+        "WorktreeRemove cleans up the worktree",
+        "CommitAll stages all changes and commits with the given message",
+        "go vet ./... passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Worktrees are used for parallel agent execution. Each parallel agent gets its own worktree to avoid file conflicts."
+    },
+    {
+      "id": "US-011",
+      "title": "Agent loop - core sequential execution",
+      "description": "As a user, I want ralph-wiggo run to read prd.json, create the feature branch, and loop through stories running Claude agents sequentially.",
+      "acceptanceCriteria": [
+        "ralph-wiggo run reads prd.json from working directory (or --prd <path>)",
+        "Creates/checks out git branch from branchName field using internal/git",
+        "Loops: calls planner.NextStories in sequential mode, spawns Claude agent via executor.RunStreaming with embedded prompt.md as --append-system-prompt and story details as prompt",
+        "Agent invoked with --dangerously-skip-permissions, --max-turns (from config, default 50), --allowedTools Bash,Read,Edit,Write,Glob,Grep",
+        "Prints streaming output to stdout as events arrive",
+        "Exits when all stories pass or --max-iterations (default 10) is reached",
+        "Flag --parallelism <mode> is accepted (but only 'sequential' works in this story)",
+        "go vet ./... passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "This story implements the basic loop only. Verification, state updates, and parallel mode are separate stories."
+    },
+    {
+      "id": "US-012",
+      "title": "Agent loop - story verification and prd.json updates",
+      "description": "As a developer, I need the agent loop to verify story completion after each agent run, update prd.json, and commit changes.",
+      "acceptanceCriteria": [
+        "After agent completes with exit code 0: set story passes = true in prd.json via prd.SavePRD",
+        "After agent completes with non-zero exit: log error, leave passes = false, increment iteration count for that story",
+        "On story pass: call git.CommitAll with message 'ralph-wiggo: US-XXX <title> [passed]'",
+        "If a story fails --max-iterations times, skip it and move to next story",
+        "Print summary after each iteration: story ID, pass/fail, iterations used",
+        "go vet ./... passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Agent loop - progress.txt and run archiving",
+      "description": "As a developer, I need the agent loop to maintain progress.txt with iteration learnings and archive previous runs when the branch changes.",
+      "acceptanceCriteria": [
+        "After each iteration: append entry to progress.txt with timestamp, story ID, pass/fail, and key events from the agent output",
+        "progress.txt is initialized with header (project name, branch, date) on first run",
+        "On startup: if prd.json exists with a different branchName than current, archive existing prd.json and progress.txt to archive/YYYY-MM-DD-feature-name/",
+        "Archive directory uses the old branchName with ralph/ prefix stripped",
+        "go vet ./... passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Agent loop - parallel execution with worktrees",
+      "description": "As a user, I want to run multiple agents concurrently on independent stories using git worktrees.",
+      "acceptanceCriteria": [
+        "When --parallelism is a number N or 'auto': planner returns multiple stories, loop spawns N agents concurrently",
+        "Each parallel agent runs in its own git worktree created via git.WorktreeAdd in .ralph-wiggo/worktrees/<story-id>/",
+        "Agents run concurrently using goroutines with errgroup or similar",
+        "On story completion: changes from worktree are merged back to the feature branch, worktree is removed",
+        "If merge conflicts occur: log the conflict, mark story as failed, clean up worktree",
+        "Context cancellation (Ctrl+C) stops all running agents and cleans up worktrees",
+        "go vet ./... passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "This builds on the sequential loop from US-011. The worktree approach prevents file conflicts between concurrent agents."
+    },
+    {
+      "id": "US-015",
+      "title": "State management package for runs and iterations",
+      "description": "As a developer, I need structured state management so the web UI and CLI can report on run progress and history.",
+      "acceptanceCriteria": [
+        "Package internal/state with types: Run (id, prdPath, branchName, startTime, status, stories), Iteration (runID, storyID, number, startTime, endTime, status, events []StreamEvent), AgentSession (storyID, status enum pending/running/passed/failed, iterations []Iteration)",
+        "RunStore interface with methods: SaveRun, GetRun, ListRuns, AddIteration, GetIterationsForStory",
+        "In-memory implementation of RunStore backed by sync.RWMutex",
+        "State persisted to <work-dir>/.ralph-wiggo/runs/ as JSON files on each mutation",
+        "On startup: loads existing run history from disk",
+        "Unit tests for store CRUD operations",
+        "go vet ./... passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Web server setup and dashboard layout",
+      "description": "As a user, I want a web dashboard that shows overall run status and story progress list.",
+      "acceptanceCriteria": [
+        "ralph-wiggo serve starts HTTP server on --port (default 8484)",
+        "ralph-wiggo run --ui starts web server alongside the agent loop",
+        "Dashboard at / shows: project name, branch name, overall progress bar (X/Y stories passed), story list with status badges (pending/running/passed/failed)",
+        "Built with Go html/template, templates embedded via go:embed",
+        "htmx JS file embedded via go:embed, served at /static/htmx.min.js",
+        "Minimal CSS embedded via go:embed (consider pico.css or hand-written), served at /static/style.css",
+        "Story list updates via htmx hx-get with hx-trigger='every 2s' polling",
+        "go vet ./... passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "Keep the UI simple — monospace fonts for code, color-coded status badges, dark-friendly. No JS frameworks beyond htmx."
+    },
+    {
+      "id": "US-017",
+      "title": "Story detail view with SSE streaming output",
+      "description": "As a user, I want to click on a story in the dashboard and see the agent's streaming output in real time.",
+      "acceptanceCriteria": [
+        "Route /story/<id> shows detail page for a story's agent session",
+        "SSE endpoint at /api/story/<id>/stream sends streaming events as text/event-stream",
+        "Events rendered as structured blocks: assistant text as prose, tool_use with name and collapsible input/output, tool_result, errors in red",
+        "Uses htmx SSE extension (hx-ext='sse', sse-connect, sse-swap) for real-time updates",
+        "Auto-scrolls to bottom as new events arrive (small JS snippet embedded)",
+        "Completed sessions show full history with timestamps",
+        "go vet ./... passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "The state store's StreamEvents for the story are fanned out to SSE subscribers. For completed stories, all events are sent immediately then the stream closes."
+    },
+    {
+      "id": "US-018",
+      "title": "Run history and log archive view",
+      "description": "As a user, I want to browse past runs and their iteration logs in the dashboard.",
+      "acceptanceCriteria": [
+        "Route /history lists all runs (current and archived) with date, branch name, story count, pass/fail summary",
+        "Clicking a run shows its iterations with per-story outcomes",
+        "Route /history/<run-id>/story/<story-id> shows iteration detail in same format as story detail view",
+        "progress.txt content viewable per-run at /history/<run-id>/progress",
+        "go vet ./... passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Progress visualization on dashboard",
+      "description": "As a user, I want visual progress indicators so I can quickly assess run status at a glance.",
+      "acceptanceCriteria": [
+        "Overall progress bar on dashboard showing stories completed / total with percentage",
+        "Per-story row shows: iteration count badge (e.g. '3/10'), time elapsed, status with color (green=passed, yellow=running, red=failed, gray=pending)",
+        "Dashboard auto-updates via htmx without full page reload",
+        "Responsive layout works on secondary monitor (large text, high contrast)",
+        "go vet ./... passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "End-to-end workflow command (ralph-wiggo full)",
+      "description": "As a user, I want a single command that chains PRD generation, conversion, and agent loop so I can go from idea to implementation in one step.",
+      "acceptanceCriteria": [
+        "ralph-wiggo full <description> chains: prd (interactive) -> convert -> run",
+        "After PRD generation: prints the PRD path and asks user to confirm before converting",
+        "After conversion: prints prd.json summary (story count, branch name) and asks user to confirm before running",
+        "User confirmation via simple y/n stdin prompt",
+        "Flags from prd, convert, and run subcommands are all available on full",
+        "--ui flag starts web dashboard during the run phase",
+        "go vet ./... passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": "Named 'full' instead of 'go' to avoid confusion with Go tooling."
+    },
+    {
+      "id": "US-021",
+      "title": "Configuration system with YAML and CLI overrides",
+      "description": "As a user, I want to configure model, budget, and tool settings via config file and CLI flags.",
+      "acceptanceCriteria": [
+        "Global flag --model (default: claude-sonnet-4-6) passed to all Claude invocations",
+        "Global flag --max-budget <dollars> sets per-agent-session budget limit",
+        "Global flag --max-turns (default: 50) sets max agentic turns per story",
+        "run flag --dry-run prints what would be executed without invoking Claude",
+        "All settings readable from .ralph-wiggo.yaml in working directory (model, maxBudget, maxTurns, parallelism, allowedTools, port)",
+        "CLI flags override config file values",
+        "go vet ./... passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": "Use a lightweight YAML library like gopkg.in/yaml.v3"
+    }
+  ]
+}

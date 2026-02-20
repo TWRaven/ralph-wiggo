@@ -1,3 +1,21 @@
 # Ralph Progress Log
 Started: Fri Feb 20 20:14:14 CET 2026
+
+## Codebase Patterns
+- Go module path: github.com/radvoogh/ralph-wiggo
+- CLI entry point: cmd/ralph-wiggo/main.go
+- Kong CLI framework: subcommands defined as struct fields on CLI type, with Run(globals *CLI) method
+- Use `gb <branch-name>` for branch creation (git-machete), `gsn` for rebase+MR
+- Fresh repos need an initial commit before `gb` works
+
+---
+
+## 2026-02-20 - US-001
+- Implemented: Go project scaffolding with module init, kong CLI framework with 5 subcommands (run, prd, convert, serve, full) and global flags (--verbose, --model, --max-budget, --max-turns, --work-dir)
+- Files changed: go.mod, go.sum, cmd/ralph-wiggo/main.go
+- **Learnings for future iterations:**
+  - Kong uses struct tags for CLI definition — subcommands are embedded structs with `cmd:""` tag
+  - Each subcommand needs a `Run(globals *CLI) error` method
+  - `gb` requires at least one commit to exist in the repo
+  - Global flags are on the parent CLI struct, automatically available to all subcommands
 ---

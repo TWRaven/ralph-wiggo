@@ -959,12 +959,7 @@ func (f *FullCmd) Run(globals *CLI) error {
 		return fmt.Errorf("prd generation: %w", err)
 	}
 
-	// Confirm before proceeding to conversion.
 	fmt.Printf("\nPRD generated at: %s\n", prdOutputPath)
-	if !confirmPrompt("Proceed with conversion to prd.json?") {
-		fmt.Println("Aborted.")
-		return nil
-	}
 
 	// Step 2: Convert PRD to prd.json (interactive).
 	fmt.Println("\n=== Step 2: PRD Conversion ===")
@@ -1010,12 +1005,6 @@ func (f *FullCmd) Run(globals *CLI) error {
 
 	fmt.Printf("Wrote %s (%d stories, branch: %s)\n", f.JSONOutput, len(parsedPRD.UserStories), parsedPRD.BranchName)
 
-	// Confirm before proceeding to run.
-	if !confirmPrompt("Proceed with agent loop?") {
-		fmt.Println("Aborted.")
-		return nil
-	}
-
 	// Step 3: Run the agent loop.
 	fmt.Println("\n=== Step 3: Agent Loop ===")
 	runCmd := RunCmd{
@@ -1025,15 +1014,6 @@ func (f *FullCmd) Run(globals *CLI) error {
 		UI:            f.UI,
 	}
 	return runCmd.Run(globals)
-}
-
-// confirmPrompt prints a y/n prompt and returns true if the user confirms.
-func confirmPrompt(message string) bool {
-	fmt.Printf("%s (y/n): ", message)
-	var response string
-	fmt.Scanln(&response)
-	response = strings.TrimSpace(strings.ToLower(response))
-	return response == "y" || response == "yes"
 }
 
 // slugify converts a string to a kebab-case slug suitable for filenames.

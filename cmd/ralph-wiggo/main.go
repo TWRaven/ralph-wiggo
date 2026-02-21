@@ -26,7 +26,7 @@ import (
 // CLI defines the top-level command structure for ralph-wiggo.
 type CLI struct {
 	Verbose  bool    `help:"Enable verbose output." short:"v"`
-	Model    string  `help:"Claude model to use." default:"claude-sonnet-4-6"`
+	Model    string  `help:"Claude model to use." default:"claude-opus-4-6"`
 	MaxBudget float64 `help:"Maximum budget in USD per agent session." name:"max-budget"`
 	MaxTurns int     `help:"Maximum agentic turns per story." default:"50" name:"max-turns"`
 	WorkDir         string   `help:"Working directory." default:"." name:"work-dir" type:"existingdir"`
@@ -64,7 +64,7 @@ func (c *CLI) AfterApply() error {
 	c.fileConfig = cfg
 
 	// Apply config file values where CLI flags are still at their defaults.
-	if cfg.Model != "" && c.Model == "claude-sonnet-4-6" {
+	if cfg.Model != "" && c.Model == "claude-opus-4-6" {
 		c.Model = cfg.Model
 	}
 	if cfg.MaxBudget != 0 && c.MaxBudget == 0 {
@@ -303,10 +303,14 @@ func printStreamEvent(evt claude.StreamEvent) {
 			fmt.Print(evt.Message)
 		}
 	case claude.EventToolUse:
-		fmt.Printf("\n[tool: %s]\n", evt.ToolName)
+		detail := toolDetail(evt)
+		if detail != "" {
+			fmt.Printf("\n  [%s] %s\n", evt.ToolName, detail)
+		} else {
+			fmt.Printf("\n  [%s]\n", evt.ToolName)
+		}
 	case claude.EventToolResult:
-		// Tool results can be large; print a brief indicator.
-		fmt.Println("[tool result]")
+		// Tool results can be large; skip to avoid noise.
 	case claude.EventError:
 		fmt.Fprintf(os.Stderr, "[error] %s\n", evt.Message)
 	case claude.EventInit:
@@ -315,6 +319,54 @@ func printStreamEvent(evt claude.StreamEvent) {
 		}
 	case claude.EventResult:
 		fmt.Println("\n[agent finished]")
+	}
+}
+
+// toolDetail extracts a short summary from a tool_use event's input.
+func toolDetail(evt claude.StreamEvent) string {
+	if len(evt.Input) == 0 {
+		return ""
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(evt.Input, &params); err != nil {
+		return ""
+	}
+
+	str := func(key string) string {
+		v, ok := params[key]
+		if !ok {
+			return ""
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return ""
+		}
+		return s
+	}
+
+	switch evt.ToolName {
+	case "Read":
+		return str("file_path")
+	case "Write":
+		return str("file_path")
+	case "Edit":
+		return str("file_path")
+	case "Glob":
+		return str("pattern")
+	case "Grep":
+		p := str("pattern")
+		if path := str("path"); path != "" {
+			return p + " in " + path
+		}
+		return p
+	case "Bash":
+		cmd := str("command")
+		if len(cmd) > 120 {
+			cmd = cmd[:120] + "..."
+		}
+		return cmd
+	default:
+		return ""
 	}
 }
 
@@ -668,9 +720,14 @@ func printParallelEvent(storyID string, evt claude.StreamEvent) {
 			fmt.Printf("%s%s", prefix, evt.Message)
 		}
 	case claude.EventToolUse:
-		fmt.Printf("%s[tool: %s]\n", prefix, evt.ToolName)
+		detail := toolDetail(evt)
+		if detail != "" {
+			fmt.Printf("%s  [%s] %s\n", prefix, evt.ToolName, detail)
+		} else {
+			fmt.Printf("%s  [%s]\n", prefix, evt.ToolName)
+		}
 	case claude.EventToolResult:
-		fmt.Printf("%s[tool result]\n", prefix)
+		// Skip to avoid noise.
 	case claude.EventError:
 		fmt.Fprintf(os.Stderr, "%s[error] %s\n", prefix, evt.Message)
 	case claude.EventInit:
@@ -680,6 +737,33 @@ func printParallelEvent(storyID string, evt claude.StreamEvent) {
 	case claude.EventResult:
 		fmt.Printf("%s[agent finished]\n", prefix)
 	}
+}
+
+// runInteractiveWithPrompt sends an initial prompt via JSON mode (to capture
+// the session ID and display Claude's response), then resumes the session
+// interactively so the user can answer follow-up questions. This avoids the
+// problem where -p makes Claude exit after a single turn.
+func runInteractiveWithPrompt(ctx context.Context, exec *claude.Executor, cfg claude.RunConfig) error {
+	// Step 1: send prompt in JSON mode to capture session ID + response text.
+	result, err := exec.RunPromptCapture(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	if result.SessionID == "" {
+		return fmt.Errorf("no session ID captured from Claude")
+	}
+
+	// Display Claude's response (e.g. clarifying questions).
+	fmt.Println(result.Text)
+
+	// Step 2: resume interactively for user Q&A.
+	resumeCfg := claude.RunConfig{
+		ResumeSessionID: result.SessionID,
+		WorkDir:         cfg.WorkDir,
+		AdditionalFlags: cfg.AdditionalFlags,
+	}
+	return exec.RunInteractive(ctx, resumeCfg)
 }
 
 // PRDCmd implements the 'prd' subcommand.
@@ -715,12 +799,13 @@ func (p *PRDCmd) Run(globals *CLI) error {
 		MaxBudgetUSD:       globals.MaxBudget,
 		WorkDir:            globals.WorkDir,
 		AppendSystemPrompt: skillContent,
+		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := exec.RunInteractive(ctx, cfg); err != nil {
+	if err := runInteractiveWithPrompt(ctx, exec, cfg); err != nil {
 		return fmt.Errorf("prd generation: %w", err)
 	}
 	return nil
@@ -747,8 +832,8 @@ func (c *ConvertCmd) Run(globals *CLI) error {
 
 	// Build a prompt with the PRD content.
 	prompt := fmt.Sprintf(
-		"Convert the following PRD markdown into the prd.json format.\n\n%s",
-		string(prdContent),
+		"Convert the following PRD markdown into the prd.json format. Save the result to %s.\n\n%s",
+		c.Output, string(prdContent),
 	)
 
 	exec := claude.NewExecutor()
@@ -759,30 +844,24 @@ func (c *ConvertCmd) Run(globals *CLI) error {
 		MaxBudgetUSD:       globals.MaxBudget,
 		WorkDir:            globals.WorkDir,
 		AppendSystemPrompt: skillContent,
+		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	result, err := exec.RunJSON(ctx, cfg, prd.JSONSchema)
-	if err != nil {
+	if err := exec.RunInteractive(ctx, cfg); err != nil {
 		return fmt.Errorf("prd conversion: %w", err)
 	}
 
-	// Parse the result into a PRD struct to validate it.
-	var parsedPRD prd.PRD
-	if err := json.Unmarshal(result, &parsedPRD); err != nil {
-		return fmt.Errorf("parsing conversion result: %w", err)
+	// Load and validate the prd.json that Claude wrote.
+	parsedPRD, err := prd.LoadPRD(c.Output)
+	if err != nil {
+		return fmt.Errorf("loading converted %s: %w", c.Output, err)
 	}
 
-	// Validate and print warnings (but don't fail).
-	if err := prd.Validate(&parsedPRD); err != nil {
+	if err := prd.Validate(parsedPRD); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: validation issue: %v\n", err)
-	}
-
-	// Save the validated PRD.
-	if err := prd.SavePRD(c.Output, &parsedPRD); err != nil {
-		return fmt.Errorf("saving prd.json: %w", err)
 	}
 
 	fmt.Printf("Wrote %s (%d stories)\n", c.Output, len(parsedPRD.UserStories))
@@ -870,12 +949,13 @@ func (f *FullCmd) Run(globals *CLI) error {
 		MaxBudgetUSD:       globals.MaxBudget,
 		WorkDir:            globals.WorkDir,
 		AppendSystemPrompt: skillContent,
+		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := exec.RunInteractive(ctx, cfg); err != nil {
+	if err := runInteractiveWithPrompt(ctx, exec, cfg); err != nil {
 		return fmt.Errorf("prd generation: %w", err)
 	}
 
@@ -886,7 +966,7 @@ func (f *FullCmd) Run(globals *CLI) error {
 		return nil
 	}
 
-	// Step 2: Convert PRD to prd.json.
+	// Step 2: Convert PRD to prd.json (interactive).
 	fmt.Println("\n=== Step 2: PRD Conversion ===")
 
 	ralphSkill, err := prompts.Get("ralph-skill.md")
@@ -900,8 +980,8 @@ func (f *FullCmd) Run(globals *CLI) error {
 	}
 
 	convertPrompt := fmt.Sprintf(
-		"Convert the following PRD markdown into the prd.json format.\n\n%s",
-		string(prdContent),
+		"Convert the following PRD markdown into the prd.json format. Save the result to %s.\n\n%s",
+		f.JSONOutput, string(prdContent),
 	)
 
 	convertCfg := claude.RunConfig{
@@ -911,24 +991,21 @@ func (f *FullCmd) Run(globals *CLI) error {
 		MaxBudgetUSD:       globals.MaxBudget,
 		WorkDir:            globals.WorkDir,
 		AppendSystemPrompt: ralphSkill,
+		AdditionalFlags:    []string{"--dangerously-skip-permissions"},
 	}
 
-	result, err := exec.RunJSON(ctx, convertCfg, prd.JSONSchema)
-	if err != nil {
+	if err := exec.RunInteractive(ctx, convertCfg); err != nil {
 		return fmt.Errorf("prd conversion: %w", err)
 	}
 
-	var parsedPRD prd.PRD
-	if err := json.Unmarshal(result, &parsedPRD); err != nil {
-		return fmt.Errorf("parsing conversion result: %w", err)
+	// Load and validate the prd.json that Claude wrote.
+	parsedPRD, err := prd.LoadPRD(f.JSONOutput)
+	if err != nil {
+		return fmt.Errorf("loading converted %s: %w", f.JSONOutput, err)
 	}
 
-	if err := prd.Validate(&parsedPRD); err != nil {
+	if err := prd.Validate(parsedPRD); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: validation issue: %v\n", err)
-	}
-
-	if err := prd.SavePRD(f.JSONOutput, &parsedPRD); err != nil {
-		return fmt.Errorf("saving prd.json: %w", err)
 	}
 
 	fmt.Printf("Wrote %s (%d stories, branch: %s)\n", f.JSONOutput, len(parsedPRD.UserStories), parsedPRD.BranchName)
@@ -976,8 +1053,16 @@ func slugify(s string) string {
 			}
 		}
 	}
-	result := b.String()
-	return strings.Trim(result, "-")
+	result := strings.Trim(b.String(), "-")
+	// Truncate to ~50 chars, breaking at a word (hyphen) boundary.
+	const maxLen = 50
+	if len(result) > maxLen {
+		result = result[:maxLen]
+		if i := strings.LastIndex(result, "-"); i > 0 {
+			result = result[:i]
+		}
+	}
+	return result
 }
 
 func main() {

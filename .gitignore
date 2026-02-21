@@ -1,0 +1,17 @@
+# Binary (root only, not cmd/ralph-wiggo/)
+/ralph-wiggo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Git machete
+.last-branch
+
+# Runtime data
+.ralph-wiggo/

@@ -40,7 +40,9 @@ const (
 	EventSystem     EventType = "system"
 )
 
-// StreamEvent represents a single NDJSON event from claude --output-format stream-json.
+// StreamEvent represents a parsed event from claude --output-format stream-json.
+// The Claude CLI emits NDJSON lines with nested message objects; this struct
+// is the flattened representation consumed by callers.
 type StreamEvent struct {
 	Type      EventType       `json:"type"`
 	SessionID string          `json:"session_id,omitempty"`
@@ -50,6 +52,96 @@ type StreamEvent struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
 	Raw       json.RawMessage `json:"-"`
+}
+
+// parseStreamLine parses a raw NDJSON line from the Claude CLI stream-json
+// output into one or more StreamEvents. A single line may contain multiple
+// content blocks (e.g. text + tool_use), each producing a separate event.
+func parseStreamLine(line []byte) []StreamEvent {
+	raw := json.RawMessage(append([]byte(nil), line...))
+
+	// First pass: extract top-level fields with message as raw JSON.
+	var top struct {
+		Type      EventType       `json:"type"`
+		SessionID string          `json:"session_id,omitempty"`
+		Message   json.RawMessage `json:"message,omitempty"`
+	}
+	if err := json.Unmarshal(line, &top); err != nil {
+		return []StreamEvent{{
+			Type:    EventError,
+			Message: fmt.Sprintf("failed to parse stream JSON: %v", err),
+			Raw:     raw,
+		}}
+	}
+
+	switch top.Type {
+	case "assistant", "user":
+		return parseMessageBlocks(top.Type, top.SessionID, top.Message, raw)
+
+	case EventResult:
+		return []StreamEvent{{Type: EventResult, SessionID: top.SessionID, Raw: raw}}
+
+	default:
+		// For init, error, system, etc. — try message as a plain string.
+		var msg string
+		_ = json.Unmarshal(top.Message, &msg)
+		return []StreamEvent{{
+			Type:      top.Type,
+			SessionID: top.SessionID,
+			Message:   msg,
+			Raw:       raw,
+		}}
+	}
+}
+
+// parseMessageBlocks extracts content blocks from an assistant or user message
+// envelope and returns the corresponding flattened StreamEvents.
+func parseMessageBlocks(evtType EventType, sessionID string, msgRaw json.RawMessage, raw json.RawMessage) []StreamEvent {
+	var msg struct {
+		Content []struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text,omitempty"`
+			Name      string          `json:"name,omitempty"`
+			ID        string          `json:"id,omitempty"`
+			ToolUseID string          `json:"tool_use_id,omitempty"`
+			Input     json.RawMessage `json:"input,omitempty"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(msgRaw, &msg); err != nil {
+		// Message isn't an object with content blocks — skip silently.
+		return nil
+	}
+
+	var events []StreamEvent
+	for _, block := range msg.Content {
+		switch block.Type {
+		case "text":
+			events = append(events, StreamEvent{
+				Type:      EventAssistant,
+				SessionID: sessionID,
+				Message:   block.Text,
+				Raw:       raw,
+			})
+		case "tool_use":
+			events = append(events, StreamEvent{
+				Type:      EventToolUse,
+				SessionID: sessionID,
+				ToolName:  block.Name,
+				ToolID:    block.ID,
+				Input:     block.Input,
+				Raw:       raw,
+			})
+		case "tool_result":
+			events = append(events, StreamEvent{
+				Type:      EventToolResult,
+				SessionID: sessionID,
+				ToolID:    block.ToolUseID,
+				Raw:       raw,
+			})
+		// Skip "thinking", "signature", and other block types.
+		}
+	}
+	return events
 }
 
 // Executor shells out to the Claude CLI.
@@ -152,26 +244,35 @@ func (e *Executor) RunStreaming(ctx context.Context, cfg RunConfig) (<-chan Stre
 		// Increase buffer for potentially large JSON lines (e.g. tool outputs).
 		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 
+		sentInit := false
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
 				continue
 			}
 
-			var evt StreamEvent
-			if err := json.Unmarshal(line, &evt); err != nil {
-				// Emit unparseable lines as error events.
-				evt = StreamEvent{
-					Type:    EventError,
-					Message: fmt.Sprintf("failed to parse stream event: %s", string(line)),
-				}
-			}
-			evt.Raw = json.RawMessage(append([]byte(nil), line...))
+			events := parseStreamLine(line)
 
-			select {
-			case ch <- evt:
-			case <-ctx.Done():
-				return
+			for _, evt := range events {
+				// Emit a synthetic init event the first time we see a session ID.
+				if !sentInit && evt.SessionID != "" {
+					sentInit = true
+					select {
+					case ch <- StreamEvent{
+						Type:      EventInit,
+						SessionID: evt.SessionID,
+					}:
+					case <-ctx.Done():
+						return
+					}
+				}
+
+				select {
+				case ch <- evt:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 
@@ -219,6 +320,63 @@ func (e *Executor) RunInteractive(ctx context.Context, cfg RunConfig) error {
 		return fmt.Errorf("claude: interactive: %w", err)
 	}
 	return nil
+}
+
+// PromptResult holds the output from a single-turn prompt invocation,
+// including the session ID needed to resume the conversation.
+type PromptResult struct {
+	SessionID string
+	Text      string
+}
+
+// RunPromptCapture runs the Claude CLI with -p and --output-format json,
+// returning the response text and session ID. This is useful for sending an
+// initial prompt and then resuming the session interactively via
+// RunInteractive with ResumeSessionID.
+func (e *Executor) RunPromptCapture(ctx context.Context, cfg RunConfig) (*PromptResult, error) {
+	bin := e.ClaudePath
+	if bin == "" {
+		bin = "claude"
+	}
+
+	args := []string{"-p", cfg.Prompt, "--output-format", "json"}
+	args = append(args, e.buildCommonArgs(cfg)...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if cfg.WorkDir != "" {
+		cmd.Dir = cfg.WorkDir
+	}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("claude: prompt capture: %w", err)
+	}
+
+	output := stdout.Bytes()
+	if len(output) == 0 {
+		return nil, fmt.Errorf("claude: prompt capture: empty output")
+	}
+
+	var envelope struct {
+		SessionID string          `json:"session_id"`
+		Result    json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(output, &envelope); err != nil {
+		return nil, fmt.Errorf("claude: prompt capture: parsing output: %w", err)
+	}
+
+	var text string
+	if err := json.Unmarshal(envelope.Result, &text); err != nil {
+		text = string(envelope.Result)
+	}
+
+	return &PromptResult{
+		SessionID: envelope.SessionID,
+		Text:      text,
+	}, nil
 }
 
 // jsonOutput is the envelope returned by claude --output-format json.
